@@ -93,7 +93,6 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     torch::Tensor qr;
     torch::Tensor q_input;
     torch::Tensor k_input;
-    torch::Tensor k_padded;
     torch::Tensor v_input;
   };
 
@@ -121,7 +120,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                    const QPreOut& q_pre,
                    const v32_sp::DeepseekV32SPContext& sp_ctx);
   v32_sp::PaddedGatherHandle sp_mla_comm(
-      const torch::Tensor& k_padded,
+      const torch::Tensor& k_input,
       const v32_sp::DeepseekV32SPContext& sp_ctx) const;
   void sp_mla_finish_k(MlaIO& pre_out,
                        const v32_sp::PaddedGatherHandle& k_handle,
