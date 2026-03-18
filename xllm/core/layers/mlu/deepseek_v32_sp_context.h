@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <numeric>
 #include <optional>
@@ -26,18 +27,118 @@ limitations under the License.
 #include "framework/batch/batch_forward_type.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
-#include "layers/mlu/deepseek_v32_sp_metadata.h"
 #include "layers/mlu/deepseek_v32_sp_plan.h"
 
 namespace xllm::layer::v32_sp {
 
 using PaddedGatherHandle = xllm::parallel_state::GatherAsyncCtx;
 
+inline torch::Tensor make_sp_prefix(const std::vector<int32_t>& seq_lens,
+                                    const torch::TensorOptions& options) {
+  std::vector<int32_t> cu_lens = {0};
+  cu_lens.reserve(seq_lens.size() + 1);
+  int32_t token_num = 0;
+  for (int32_t seq_len : seq_lens) {
+    token_num += seq_len;
+    cu_lens.push_back(token_num);
+  }
+  return torch::tensor(cu_lens, options);
+}
+
+inline AttentionMetadata build_local_prefill_attention_metadata(
+    const AttentionMetadata& base_attn_metadata,
+    const std::vector<DeepseekV32SPSegment>& segments) {
+  const auto int32_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+  std::vector<int32_t> seg_q_tokens;
+  std::vector<int32_t> seg_suffix_k_lens;
+  seg_q_tokens.reserve(segments.size());
+  seg_suffix_k_lens.reserve(segments.size());
+
+  int32_t max_query_len = 0;
+  int32_t max_seq_len = 0;
+  for (const auto& segment : segments) {
+    CHECK_LE(segment.suffix_k_len, segment.ctx_k_len)
+        << "deepseek_v32 sequence parallel expects suffix_k_len <= ctx_k_len.";
+    seg_q_tokens.push_back(segment.q_tokens);
+    seg_suffix_k_lens.push_back(segment.suffix_k_len);
+    max_query_len = std::max(max_query_len, segment.q_tokens);
+    max_seq_len = std::max(max_seq_len, segment.suffix_k_len);
+  }
+
+  AttentionMetadata local_attn_metadata = base_attn_metadata;
+  const torch::Device device = base_attn_metadata.q_cu_seq_lens.device();
+  local_attn_metadata.q_cu_seq_lens =
+      make_sp_prefix(seg_q_tokens, int32_options).to(device);
+  local_attn_metadata.kv_cu_seq_lens =
+      make_sp_prefix(seg_suffix_k_lens, int32_options).to(device);
+  // Local SP metadata stays on the live suffix view. Cached prefix tokens are
+  // addressed later through seg_ctx_lens + block_table in the indexer path.
+  local_attn_metadata.kv_seq_lens =
+      torch::tensor(seg_suffix_k_lens, int32_options).to(device);
+  local_attn_metadata.max_query_len = max_query_len;
+  local_attn_metadata.max_seq_len = max_seq_len;
+  return local_attn_metadata;
+}
+
+inline std::vector<int32_t> build_seq_offsets(
+    const std::vector<int32_t>& seq_lens) {
+  std::vector<int32_t> offsets;
+  offsets.reserve(seq_lens.size());
+  int32_t offset = 0;
+  for (int32_t seq_len : seq_lens) {
+    offsets.push_back(offset);
+    offset += seq_len;
+  }
+  return offsets;
+}
+
+inline torch::Tensor build_segment_length_matrix(
+    const std::vector<DeepseekV32SPSegment>& segments,
+    int32_t DeepseekV32SPSegment::* length_field,
+    const torch::Device& device) {
+  std::vector<int32_t> values;
+  values.reserve(segments.size() * 2);
+  for (const auto& segment : segments) {
+    values.push_back(0);
+    values.push_back(segment.*length_field);
+  }
+
+  auto cpu_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+  return torch::tensor(values, cpu_options)
+      .view({static_cast<int64_t>(segments.size()), 2})
+      .to(device)
+      .contiguous();
+}
+
+inline torch::Tensor build_segment_ctx_lens_tensor(
+    const std::vector<DeepseekV32SPSegment>& segments,
+    const torch::Device& device) {
+  std::vector<int32_t> values;
+  values.reserve(segments.size());
+  for (const auto& segment : segments) {
+    values.push_back(segment.ctx_k_len);
+  }
+
+  auto cpu_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+  return torch::tensor(values, cpu_options).to(device).contiguous();
+}
+
 struct DeepseekV32SPContext {
   DeepseekV32SPCommPlan comm_plan;
   AttentionMetadata local_attn_metadata;
-  DeepseekV32SPMetadata sp_meta;
   BatchForwardType batch_forward_type;
+  std::vector<DeepseekV32SPSegment> local_segments;
+  std::vector<int32_t> seg_q_starts_cpu;
+  std::vector<int32_t> req_q_offsets_cpu;
+  std::vector<int32_t> req_ctx_offsets_cpu;
+
+  torch::Tensor seg_q_cu_lens_2col;
+  torch::Tensor seg_suffix_k_cu_lens_2col;
+  torch::Tensor seg_ctx_k_cu_lens_2col;
+  torch::Tensor seg_ctx_lens_1col;
 
   torch::Tensor gathered_reorder_index;
   torch::Tensor gathered_slot_mapping;
@@ -92,22 +193,60 @@ inline std::optional<DeepseekV32SPContext> build_deepseek_v32_sp_context(
   const auto local_segments = build_local_sp_segments(curr_rank, all_segments);
   const auto runtime_artifacts = build_sp_runtime_artifacts(
       curr_rank, world_size, all_segments, total_tokens);
+  const torch::Device runtime_device =
+      base_attn_metadata.block_table.defined()
+          ? base_attn_metadata.block_table.device()
+          : base_attn_metadata.q_cu_seq_lens.device();
   context.comm_plan = runtime_artifacts.comm_plan;
+  context.local_segments = local_segments;
   context.local_attn_metadata = build_local_prefill_attention_metadata(
       base_attn_metadata, local_segments);
-  context.sp_meta =
-      build_sp_metadata(base_attn_metadata, local_segments, q_seq_lens);
+  context.seg_q_starts_cpu =
+      build_seq_offsets(extract_q_seq_lens(context.local_attn_metadata));
+  context.req_q_offsets_cpu = build_seq_offsets(q_seq_lens);
+  context.req_ctx_offsets_cpu = build_seq_offsets(ctx_seq_lens);
+  context.seg_q_cu_lens_2col = build_segment_length_matrix(
+      local_segments, &DeepseekV32SPSegment::q_tokens, runtime_device);
+  context.seg_suffix_k_cu_lens_2col = build_segment_length_matrix(
+      local_segments, &DeepseekV32SPSegment::suffix_k_len, runtime_device);
+  context.seg_ctx_k_cu_lens_2col = build_segment_length_matrix(
+      local_segments, &DeepseekV32SPSegment::ctx_k_len, runtime_device);
+  context.seg_ctx_lens_1col =
+      build_segment_ctx_lens_tensor(local_segments, runtime_device);
   context.batch_forward_type = batch_forward_type;
   context.total_tokens = total_tokens;
   context.rank = curr_rank;
   context.process_group = sp_group;
 
+  CHECK_EQ(context.seg_q_starts_cpu.size(), context.local_segments.size())
+      << "deepseek_v32 sequence parallel expects one q start per segment.";
+  CHECK_EQ(context.seg_q_cu_lens_2col.size(0),
+           static_cast<int64_t>(context.local_segments.size()))
+      << "deepseek_v32 sequence parallel expects one q cu-lens row per "
+         "segment.";
+  CHECK_EQ(context.seg_suffix_k_cu_lens_2col.size(0),
+           static_cast<int64_t>(context.local_segments.size()))
+      << "deepseek_v32 sequence parallel expects one suffix-k cu-lens row "
+         "per segment.";
+  CHECK_EQ(context.seg_ctx_k_cu_lens_2col.size(0),
+           static_cast<int64_t>(context.local_segments.size()))
+      << "deepseek_v32 sequence parallel expects one ctx-k cu-lens row per "
+         "segment.";
+  CHECK_EQ(context.seg_ctx_lens_1col.size(0),
+           static_cast<int64_t>(context.local_segments.size()))
+      << "deepseek_v32 sequence parallel expects one ctx len per segment.";
+  CHECK_EQ(context.req_q_offsets_cpu.size(), q_seq_lens.size())
+      << "deepseek_v32 sequence parallel expects one request-q offset per "
+         "request.";
+  CHECK_EQ(context.req_ctx_offsets_cpu.size(), ctx_seq_lens.size())
+      << "deepseek_v32 sequence parallel expects one request-ctx offset per "
+         "request.";
+
   const auto int64_options =
       torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-  const torch::Device device = tokens.device();
   context.gathered_reorder_index =
       torch::tensor(runtime_artifacts.gathered_reorder_index_cpu, int64_options)
-          .to(device);
+          .to(tokens.device());
   if (base_attn_metadata.slot_mapping.defined()) {
     context.gathered_slot_mapping = reorder_by_index(
         base_attn_metadata.slot_mapping, context.gathered_reorder_index);

@@ -71,7 +71,6 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                      index_cache,
                                      attn_metadata,
                                      sp_ctx.gathered_slot_mapping,
-                                     sp_ctx.sp_meta,
                                      sp_ctx);
   new_block_tables = std::get<0>(index_out);
   new_context_lens = std::get<1>(index_out);
