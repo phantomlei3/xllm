@@ -59,6 +59,17 @@ class ScriptedAllGatherProcessGroup
     return xllm::layer::test::make_completed_work();
   }
 
+  c10::intrusive_ptr<c10d::Work> allgather_base_async(
+      const torch::Tensor& input,
+      torch::Tensor& output) override {
+    (void)input;
+    CHECK_EQ(output.size(0), static_cast<int64_t>(scripted_outputs_.size()));
+    for (size_t i = 0; i < scripted_outputs_.size(); ++i) {
+      output[static_cast<int64_t>(i)].copy_(scripted_outputs_[i]);
+    }
+    return xllm::layer::test::make_completed_work();
+  }
+
  private:
   std::vector<torch::Tensor> scripted_outputs_;
 };
@@ -720,59 +731,11 @@ TEST(DeepseekV32SPUtilsTest, RestoreGatheredToGlobalOrderWithoutPadding) {
 
   torch::Tensor gathered =
       context.gathered_reorder_index.to(torch::kFloat32).contiguous();
-  torch::Tensor restored = restore_gathered_to_global_order(
-      gathered, context, GatheredTensorLayout::kPacked);
+  torch::Tensor restored = restore_gathered_to_global_order(gathered, context);
 
   EXPECT_TRUE(torch::equal(
       restored,
       torch::arange(0, 16, torch::TensorOptions().dtype(torch::kFloat32))));
-}
-
-TEST(DeepseekV32SPUtilsTest, RestoreGatheredToGlobalOrderDropsPadding) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
-
-  AttentionMetadata attn_metadata = make_prefill_metadata({10});
-  torch::Tensor tokens =
-      torch::arange(0, 10, torch::TensorOptions().dtype(torch::kInt32));
-  auto maybe_context =
-      build_deepseek_v32_sp_context(attn_metadata,
-                                    BatchForwardType::PREFILL,
-                                    tokens,
-                                    reinterpret_cast<ProcessGroup*>(0x1),
-                                    1,
-                                    4);
-  ASSERT_TRUE(maybe_context.has_value());
-  const auto& context = maybe_context.value();
-
-  const int64_t padded_token_num =
-      std::accumulate(context.comm_plan.padded_tokens_per_rank.begin(),
-                      context.comm_plan.padded_tokens_per_rank.end(),
-                      int64_t{0});
-  torch::Tensor gathered = torch::zeros(
-      {padded_token_num}, torch::TensorOptions().dtype(torch::kFloat32));
-  auto* gathered_ptr = gathered.data_ptr<float>();
-  auto gathered_index = context.gathered_reorder_index.to(torch::kCPU);
-  const auto* gathered_index_ptr = gathered_index.data_ptr<int64_t>();
-  int64_t padded_offset = 0;
-  int64_t packed_offset = 0;
-  for (size_t rank = 0; rank < context.comm_plan.tokens_per_rank.size();
-       ++rank) {
-    const int32_t valid_token_num = context.comm_plan.tokens_per_rank[rank];
-    for (int32_t i = 0; i < valid_token_num; ++i) {
-      gathered_ptr[padded_offset + i] =
-          static_cast<float>(gathered_index_ptr[packed_offset + i]);
-    }
-    padded_offset += context.comm_plan.padded_tokens_per_rank[rank];
-    packed_offset += valid_token_num;
-  }
-
-  torch::Tensor restored = restore_gathered_to_global_order(
-      gathered, context, GatheredTensorLayout::kPaddedPacked);
-
-  EXPECT_TRUE(torch::equal(
-      restored,
-      torch::arange(0, 10, torch::TensorOptions().dtype(torch::kFloat32))));
 }
 
 TEST(DeepseekV32SPUtilsTest, AllGatherAcrossRanksRestoresGlobalOrder) {
@@ -818,8 +781,7 @@ TEST(DeepseekV32SPUtilsTest, AllGatherAcrossRanksRestoresGlobalOrder) {
       {2.0f, 3.0f, 8.0f}, torch::TensorOptions().dtype(torch::kFloat32));
 
   torch::Tensor gathered = all_gather_across_ranks(local_tensor, context);
-  torch::Tensor restored = restore_gathered_to_global_order(
-      gathered, context, GatheredTensorLayout::kPacked);
+  torch::Tensor restored = restore_gathered_to_global_order(gathered, context);
 
   EXPECT_TRUE(torch::equal(
       restored,
@@ -937,7 +899,7 @@ TEST(DeepseekV32SPUtilsTest, SPContextBuildsGatheredSlotMapping) {
   EXPECT_TRUE(torch::equal(context.gathered_slot_mapping, expected));
 }
 
-TEST(DeepseekV32SPUtilsTest, PaddedGatherReturnsGatheredOrder) {
+TEST(DeepseekV32SPUtilsTest, AsyncGatherReturnsGatheredOrder) {
   ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
   ScopedFlagValue nnodes(FLAGS_nnodes, 4);
 
@@ -979,11 +941,10 @@ TEST(DeepseekV32SPUtilsTest, PaddedGatherReturnsGatheredOrder) {
   torch::Tensor local_tensor = torch::tensor(
       {2.0f, 3.0f, 8.0f}, torch::TensorOptions().dtype(torch::kFloat32));
 
-  auto gather_handle =
-      launch_gather_padded(pad_to_sp_rows(local_tensor, context), context);
-  torch::Tensor gathered = finish_gather_padded(gather_handle, context);
-  torch::Tensor restored = restore_gathered_to_global_order(
-      gathered, context, GatheredTensorLayout::kPacked);
+  auto gather_handle = xllm::parallel_state::launch_gather(
+      local_tensor, &scripted_group, context.comm_plan.tokens_per_rank);
+  torch::Tensor gathered = xllm::parallel_state::finish_gather(gather_handle);
+  torch::Tensor restored = restore_gathered_to_global_order(gathered, context);
 
   EXPECT_TRUE(torch::equal(gathered,
                            context.gathered_reorder_index.to(

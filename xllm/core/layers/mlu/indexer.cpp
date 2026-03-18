@@ -410,25 +410,26 @@ IndexerSPPreOut IndexerImpl::sp_pre(
                                 attn_metadata,
                                 /*is_prefill=*/true,
                                 /*write_k_cache=*/false);
-  out.k_padded = v32_sp::pad_to_sp_rows(out.k_local, sp_ctx);
   return out;
 }
 
 v32_sp::PaddedGatherHandle IndexerImpl::sp_comm(
-    const torch::Tensor& k_padded,
+    const torch::Tensor& k_local,
     const v32_sp::DeepseekV32SPContext& sp_ctx) {
-  if (!k_padded.defined()) {
+  if (!k_local.defined()) {
     return {};
   }
-  return v32_sp::launch_gather_padded(k_padded, sp_ctx);
+  return parallel_state::launch_gather(
+      k_local, sp_ctx.process_group, sp_ctx.comm_plan.tokens_per_rank);
 }
 
 torch::Tensor IndexerImpl::sp_wait_k(
     const torch::Tensor& k_local,
     const v32_sp::PaddedGatherHandle& gather_handle,
     const v32_sp::DeepseekV32SPContext& sp_ctx) {
-  if (!gather_handle.gather_ctx.shards.empty()) {
-    return v32_sp::finish_gather_padded(gather_handle, sp_ctx);
+  if (gather_handle.stacked.defined()) {
+    (void)sp_ctx;
+    return parallel_state::finish_gather(gather_handle);
   }
   return k_local;
 }

@@ -58,7 +58,6 @@ struct IndexerRuntimeContext {
 struct IndexerSPPreOut {
   torch::Tensor q;
   torch::Tensor k_local;
-  torch::Tensor k_padded;
   torch::Tensor weights;
 };
 
@@ -94,7 +93,7 @@ class IndexerImpl : public torch::nn::Module {
                          const v32_sp::DeepseekV32SPContext& sp_ctx);
 
   v32_sp::PaddedGatherHandle sp_comm(
-      const torch::Tensor& k_padded,
+      const torch::Tensor& k_local,
       const v32_sp::DeepseekV32SPContext& sp_ctx);
 
   torch::Tensor sp_wait_k(const torch::Tensor& k_local,

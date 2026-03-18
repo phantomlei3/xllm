@@ -31,14 +31,7 @@ limitations under the License.
 
 namespace xllm::layer::v32_sp {
 
-enum class GatheredTensorLayout {
-  kPacked,
-  kPaddedPacked,
-};
-
-struct PaddedGatherHandle {
-  parallel_state::GatherAsyncCtx gather_ctx;
-};
+using PaddedGatherHandle = xllm::parallel_state::GatherAsyncCtx;
 
 struct DeepseekV32SPContext {
   DeepseekV32SPCommPlan comm_plan;
@@ -162,8 +155,7 @@ inline torch::Tensor all_gather_across_ranks(
 
 inline torch::Tensor restore_gathered_to_global_order(
     const torch::Tensor& gathered_tensor,
-    const DeepseekV32SPContext& context,
-    GatheredTensorLayout layout) {
+    const DeepseekV32SPContext& context) {
   if (!gathered_tensor.defined()) {
     return gathered_tensor;
   }
@@ -179,47 +171,9 @@ inline torch::Tensor restore_gathered_to_global_order(
   torch::Tensor restored =
       torch::zeros(output_sizes, gathered_tensor.options());
 
-  torch::Tensor restore_index;
-  torch::Tensor valid_tensor = gathered_tensor;
-  if (layout == GatheredTensorLayout::kPacked) {
-    CHECK_EQ(gathered_tensor.size(0), context.gathered_reorder_index.size(0))
-        << "unexpected packed tensor length for sequence parallel restore.";
-    restore_index = context.gathered_reorder_index;
-  } else {
-    const int64_t padded_token_num =
-        std::accumulate(context.comm_plan.padded_tokens_per_rank.begin(),
-                        context.comm_plan.padded_tokens_per_rank.end(),
-                        int64_t{0});
-    CHECK_EQ(gathered_tensor.size(0), padded_token_num)
-        << "unexpected padded tensor length for sequence parallel restore.";
-    restore_index = context.gathered_reorder_index;
-
-    std::vector<torch::Tensor> valid_slices;
-    valid_slices.reserve(context.comm_plan.tokens_per_rank.size());
-    int64_t gathered_offset = 0;
-    for (size_t rank = 0; rank < context.comm_plan.tokens_per_rank.size();
-         ++rank) {
-      const int32_t valid_token_num = context.comm_plan.tokens_per_rank[rank];
-      if (valid_token_num > 0) {
-        valid_slices.push_back(
-            gathered_tensor.narrow(0, gathered_offset, valid_token_num));
-      }
-      gathered_offset += context.comm_plan.padded_tokens_per_rank[rank];
-    }
-
-    if (valid_slices.empty()) {
-      auto empty_shape = gathered_tensor.sizes().vec();
-      empty_shape[0] = 0;
-      valid_tensor = torch::empty(empty_shape, gathered_tensor.options());
-    } else if (valid_slices.size() == 1) {
-      valid_tensor = valid_slices.front().contiguous();
-    } else {
-      valid_tensor = torch::cat(valid_slices, 0).contiguous();
-    }
-    CHECK_EQ(valid_tensor.size(0), restore_index.size(0))
-        << "unexpected valid token length for padded sequence parallel "
-           "restore.";
-  }
+  CHECK_EQ(gathered_tensor.size(0), context.gathered_reorder_index.size(0))
+      << "unexpected packed tensor length for sequence parallel restore.";
+  torch::Tensor restore_index = context.gathered_reorder_index;
 
   if (restore_index.device() != gathered_tensor.device()) {
     restore_index = restore_index.to(gathered_tensor.device());
@@ -227,7 +181,7 @@ inline torch::Tensor restore_gathered_to_global_order(
   if (restore_index.scalar_type() != torch::kLong) {
     restore_index = restore_index.to(torch::kLong);
   }
-  restored.index_copy_(0, restore_index, valid_tensor);
+  restored.index_copy_(0, restore_index, gathered_tensor);
   return restored;
 }
 
@@ -235,9 +189,7 @@ inline torch::Tensor gather_and_restore_global(
     const torch::Tensor& local_tensor,
     const DeepseekV32SPContext& context) {
   return restore_gathered_to_global_order(
-      all_gather_across_ranks(local_tensor, context),
-      context,
-      GatheredTensorLayout::kPacked);
+      all_gather_across_ranks(local_tensor, context), context);
 }
 
 inline torch::Tensor slice_local_packed(const torch::Tensor& packed_tensor,
@@ -272,55 +224,6 @@ inline torch::Tensor pad_to_sp_rows(const torch::Tensor& local_tensor,
   pad_shape[0] = target_rows - local_tensor.size(0);
   torch::Tensor pad_tensor = torch::zeros(pad_shape, local_tensor.options());
   return torch::cat({local_tensor.contiguous(), pad_tensor}, /*dim=*/0);
-}
-
-inline PaddedGatherHandle launch_gather_padded(
-    const torch::Tensor& padded_tensor,
-    const DeepseekV32SPContext& context) {
-  PaddedGatherHandle handle;
-  if (!padded_tensor.defined()) {
-    return handle;
-  }
-  CHECK_EQ(padded_tensor.size(0),
-           context.comm_plan.padded_tokens_per_rank.at(context.rank))
-      << "padded gather expects local tensor to be padded before launch.";
-  handle.gather_ctx = xllm::parallel_state::launch_gather(
-      padded_tensor,
-      context.process_group,
-      context.comm_plan.padded_tokens_per_rank);
-  return handle;
-}
-
-inline torch::Tensor finish_gather_padded(const PaddedGatherHandle& handle,
-                                          const DeepseekV32SPContext& context) {
-  if (handle.gather_ctx.shards.empty()) {
-    return torch::Tensor();
-  }
-  if (handle.gather_ctx.work.defined()) {
-    handle.gather_ctx.work->wait();
-  }
-
-  std::vector<torch::Tensor> valid_slices;
-  valid_slices.reserve(context.comm_plan.tokens_per_rank.size());
-  for (size_t rank = 0; rank < context.comm_plan.tokens_per_rank.size();
-       ++rank) {
-    const int32_t valid_token_num = context.comm_plan.tokens_per_rank[rank];
-    if (valid_token_num <= 0) {
-      continue;
-    }
-    valid_slices.push_back(
-        handle.gather_ctx.shards[rank].narrow(0, 0, valid_token_num));
-  }
-  if (valid_slices.empty()) {
-    auto empty_shape = handle.gather_ctx.shards.front().sizes().vec();
-    empty_shape[0] = 0;
-    return torch::empty(empty_shape,
-                        handle.gather_ctx.shards.front().options());
-  }
-  if (valid_slices.size() == 1) {
-    return valid_slices.front().contiguous();
-  }
-  return torch::cat(valid_slices, 0).contiguous();
 }
 
 }  // namespace xllm::layer::v32_sp
