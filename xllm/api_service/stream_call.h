@@ -25,10 +25,24 @@ limitations under the License.
 #include <optional>
 #include <string>
 
+#include "anthropic.pb.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
 
 namespace xllm {
+
+inline const char* to_anthropic_err_type(StatusCode code) {
+  switch (code) {
+    case StatusCode::INVALID_ARGUMENT:
+      return "invalid_request_error";
+    case StatusCode::RESOURCE_EXHAUSTED:
+      return "rate_limit_error";
+    case StatusCode::UNAVAILABLE:
+      return "overloaded_error";
+    default:
+      return "api_error";
+  }
+}
 
 template <typename Request, typename Response>
 class StreamCall : public Call {
@@ -164,19 +178,36 @@ class StreamCall : public Call {
 class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                                         proto::AnthropicMessagesResponse> {
  public:
+  using Base = StreamCall<proto::AnthropicMessagesRequest,
+                          proto::AnthropicMessagesResponse>;
+
   AnthropicCall(brpc::Controller* controller,
                 ::google::protobuf::Closure* done,
                 proto::AnthropicMessagesRequest* request,
                 proto::AnthropicMessagesResponse* response,
                 bool use_arena = false)
-      : StreamCall<proto::AnthropicMessagesRequest,
-                   proto::AnthropicMessagesResponse>(controller,
-                                                     done,
-                                                     request,
-                                                     response,
-                                                     use_arena) {}
+      : Base(controller, done, request, response, use_arena) {}
 
   ~AnthropicCall() {}
+
+  bool finish() {
+    // Anthropic SSE ends at message_stop + connection close.
+    return true;
+  }
+
+  bool finish_with_error(const StatusCode& code,
+                         const std::string& error_message) {
+    if (!this->stream_) {
+      return Base::finish_with_error(code, error_message);
+    }
+
+    proto::AnthropicStreamEvent event;
+    event.set_type("error");
+    auto* error = event.mutable_error();
+    error->set_type(to_anthropic_err_type(code));
+    error->set_message(error_message);
+    return write(event.type(), event);
+  }
 
   // Write SSE event with Anthropic format: event: <type>\ndata: <json>\n\n
   bool write(const std::string& event_type, const std::string& json_data) {

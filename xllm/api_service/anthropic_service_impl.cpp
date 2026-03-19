@@ -714,7 +714,6 @@ void AnthropicServiceImpl::process_async_impl(
         // event: content_block_stop
         // event: message_delta        (only once, at the end)
         // event: message_stop
-        // data: [DONE]
         if (stream) {
           // 1. Send `message_start` event
           if (!message_started) {

@@ -112,7 +112,8 @@ class HttpClient {
                    const nlohmann::json& body,
                    const std::map<std::string, std::string>& headers,
                    std::vector<std::pair<std::string, nlohmann::json>>& events,
-                   int& status_code) {
+                   int& status_code,
+                   std::string* raw_body = nullptr) {
     brpc::Controller cntl;
     cntl.http_request().uri() = path;
     cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
@@ -135,6 +136,9 @@ class HttpClient {
 
     status_code = cntl.http_response().status_code();
     std::string response_body = cntl.response_attachment().to_string();
+    if (raw_body != nullptr) {
+      *raw_body = response_body;
+    }
 
     // Parse response as SSE stream
     std::istringstream stream(response_body);
@@ -634,9 +638,14 @@ TEST_F(DISABLED_AnthropicServerFeaturesTest, CompletionStream) {
       {"stream", true}};
 
   std::vector<std::pair<std::string, nlohmann::json>> events;
+  std::string raw_body;
   int status_code;
-  bool success = client_->post_stream(
-      "/v1/messages", request_body, get_headers(), events, status_code);
+  bool success = client_->post_stream("/v1/messages",
+                                      request_body,
+                                      get_headers(),
+                                      events,
+                                      status_code,
+                                      &raw_body);
 
   ASSERT_TRUE(success) << "Request failed";
   EXPECT_EQ(status_code, 200) << "Expected status 200, got " << status_code;
@@ -662,6 +671,8 @@ TEST_F(DISABLED_AnthropicServerFeaturesTest, CompletionStream) {
   EXPECT_TRUE(contains("content_block_stop"))
       << "Missing 'content_block_stop' event";
   EXPECT_TRUE(contains("message_stop")) << "Missing 'message_stop' event";
+  EXPECT_EQ(raw_body.find("[DONE]"), std::string::npos)
+      << "Anthropic stream should not include OpenAI [DONE] marker";
 }
 
 // Validate complete chat response structure and metadata
@@ -715,9 +726,14 @@ TEST_F(DISABLED_AnthropicServerFeaturesTest, ChatCompletionStream) {
       {"stream", true}};
 
   std::vector<std::pair<std::string, nlohmann::json>> events;
+  std::string raw_body;
   int status_code;
-  bool success = client_->post_stream(
-      "/v1/messages", request_body, get_headers(), events, status_code);
+  bool success = client_->post_stream("/v1/messages",
+                                      request_body,
+                                      get_headers(),
+                                      events,
+                                      status_code,
+                                      &raw_body);
 
   ASSERT_TRUE(success) << "Request failed";
   EXPECT_EQ(status_code, 200) << "Expected status 200, got " << status_code;
@@ -745,6 +761,8 @@ TEST_F(DISABLED_AnthropicServerFeaturesTest, ChatCompletionStream) {
   EXPECT_TRUE(contains("content_block_stop"))
       << "Missing 'content_block_stop' event";
   EXPECT_TRUE(contains("message_stop")) << "Missing 'message_stop' event";
+  EXPECT_EQ(raw_body.find("[DONE]"), std::string::npos)
+      << "Anthropic stream should not include OpenAI [DONE] marker";
 }
 
 // Verify system message is properly applied to conversation
