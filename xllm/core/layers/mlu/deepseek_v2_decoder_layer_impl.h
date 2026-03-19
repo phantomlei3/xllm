@@ -91,6 +91,7 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   torch::Tensor restore_ffn_output(torch::Tensor x,
                                    const PostAttnCarrier& carrier,
                                    const ModelInputParams& input_params);
+  torch::Tensor reduce_out(torch::Tensor x, ProcessGroup* pg) const;
 
   friend class DeepseekV2DecoderLayerTestPeer;
 

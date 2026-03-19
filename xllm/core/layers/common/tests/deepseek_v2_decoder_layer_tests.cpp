@@ -83,6 +83,20 @@ class DeepseekV2DecoderLayerTestPeer {
                                  torch::Tensor x) {
     return std::get<0>(decoder.post_norm_->forward(x));
   }
+
+  static DenseMLP mlp(DeepseekV2DecoderLayerImpl& decoder) {
+    return decoder.mlp_;
+  }
+
+  static FusedMoE moe(DeepseekV2DecoderLayerImpl& decoder) {
+    return decoder.moe_mlp_;
+  }
+
+  static torch::Tensor reduce_out(DeepseekV2DecoderLayerImpl& decoder,
+                                  torch::Tensor x,
+                                  ProcessGroup* pg) {
+    return decoder.reduce_out(x, pg);
+  }
 };
 
 class DeepseekV2DecoderLayerTest : public ::testing::Test {
@@ -1299,6 +1313,42 @@ TEST_F(DeepseekV2DecoderLayerTest, ForwardMixedDpMoEReturnsLocalSlice) {
   EXPECT_EQ(output.size(0), 2);
   EXPECT_EQ(output.size(1), model_args_.hidden_size());
   EXPECT_FALSE(residual.has_value());
+}
+
+TEST_F(DeepseekV2DecoderLayerTest, DenseMlpReductionMovesToDecoder) {
+  global_pg_ = std::make_unique<test::MockProcessGroup>(
+      options_.device(), /*rank=*/0, /*world_size=*/2);
+  auto tp_pg = std::make_unique<CountingProcessGroup>(
+      options_.device(), /*rank=*/0, /*world_size=*/2);
+  auto* tp_pg_raw = tp_pg.get();
+  tp_pg_ = std::move(tp_pg);
+
+  parallel_args_ = ParallelArgs(
+      /*rank=*/0, /*world_size=*/2, /*dp_size=*/1, global_pg_.get());
+  parallel_args_.process_group_ = global_pg_.get();
+  parallel_args_.tp_group_ = tp_pg_.get();
+  refresh_ctx();
+
+  auto decoder = make_loaded_decoder(/*layer_id=*/0);
+  auto hidden_states = test::seeded_tensor("deepseek_v2_decoder.dense_ffn",
+                                           {4, model_args_.hidden_size()},
+                                           torch::kBFloat16,
+                                           options_.device());
+
+  auto local_out =
+      DeepseekV2DecoderLayerTestPeer::mlp(*decoder)->forward(hidden_states);
+  sync_dev();
+
+  EXPECT_EQ(tp_pg_raw->allreduce_calls(), 0);
+  ASSERT_EQ(local_out.size(0), hidden_states.size(0));
+  ASSERT_EQ(local_out.size(1), model_args_.hidden_size());
+
+  auto reduced_out = DeepseekV2DecoderLayerTestPeer::reduce_out(
+      *decoder, local_out, parallel_args_.tp_group_);
+  sync_dev();
+
+  EXPECT_EQ(tp_pg_raw->allreduce_calls(), 1);
+  EXPECT_EQ(reduced_out.sizes(), local_out.sizes());
 }
 
 TEST_P(DeepseekV2DecoderLayerParamTest,

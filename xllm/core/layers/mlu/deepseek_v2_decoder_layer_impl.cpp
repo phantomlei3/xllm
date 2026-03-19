@@ -103,12 +103,11 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
 
   // Initialize mlp
   if (is_moe_layer_) {
-    moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
-                                        FusedMoEArgs{.is_gated = true},
-                                        quant_args,
-                                        parallel_args_,
-                                        options));
+    const FusedMoEArgs moe_args{.is_gated = true,
+                                .enable_result_reduction = false};
+    moe_mlp_ = register_module(
+        "mlp",
+        FusedMoE(model_args, moe_args, quant_args, parallel_args_, options));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),
@@ -116,7 +115,7 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
                                     /*is_gated=*/true,
                                     /*has_bias=*/false,
                                     model_args.hidden_act(),
-                                    /*enable_result_reduction=*/true,
+                                    /*enable_result_reduction=*/false,
                                     quant_args,
                                     parallel_args_.tp_group_,
                                     options));
@@ -258,6 +257,14 @@ torch::Tensor DeepseekV2DecoderLayerImpl::restore_ffn_output(
   return x + skip_local;
 }
 
+torch::Tensor DeepseekV2DecoderLayerImpl::reduce_out(torch::Tensor x,
+                                                     ProcessGroup* pg) const {
+  if (!pg || pg->world_size() <= 1) {
+    return x;
+  }
+  return parallel_state::reduce(x, pg);
+}
+
 torch::Tensor DeepseekV2DecoderLayerImpl::forward(
     torch::Tensor& x,
     std::optional<torch::Tensor>& residual,
@@ -299,9 +306,27 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
 
   // MLP forward
   if (moe_mlp_) {
+    torch::Tensor shared_out;
+    if (!enable_moe_all2all) {
+      shared_out = moe_mlp_->forward_shared(x);
+      if (shared_out.defined()) {
+        shared_out = reduce_out(shared_out, moe_mlp_->shared_pg());
+      }
+    }
     x = moe_mlp_->forward_experts(x, enable_moe_all2all);
+    if (!enable_moe_all2all) {
+      if (parallel_args_.ep_size() > 1) {
+        x = reduce_out(x, parallel_args_.moe_ep_group_);
+      } else {
+        x = reduce_out(x, parallel_args_.tp_group_);
+      }
+      if (shared_out.defined()) {
+        x = x + shared_out;
+      }
+    }
   } else {
     x = mlp_(x);
+    x = reduce_out(x, parallel_args_.tp_group_);
   }
   x = restore_ffn_output(x, carrier, input_params);
 
