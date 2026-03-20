@@ -30,6 +30,16 @@ bool use_moe_all2all(bool enable_deep_ep,
 
 torch::Tensor slice_tp_tokens(torch::Tensor x, const ParallelArgs& args);
 
+bool same_sp_topology(ProcessGroup* pg, ProcessGroup* sp_pg) {
+  return pg != nullptr && sp_pg != nullptr &&
+         pg->world_size() == sp_pg->world_size() && pg->rank() == sp_pg->rank();
+}
+
+bool is_sp_alias_pg(ProcessGroup* pg, const ParallelArgs& parallel_args) {
+  return pg == parallel_args.process_group_ ||
+         pg == parallel_args.moe_ep_group_;
+}
+
 std::pair<torch::Tensor, PaddingInfo> shard_attn_out(
     torch::Tensor x,
     const torch::Tensor& residual,
@@ -229,6 +239,45 @@ torch::Tensor DeepseekV2DecoderLayerImpl::materialize_ffn_input(
       carrier.ffn_in, input_params.dp_global_token_nums, parallel_args_);
 }
 
+bool DeepseekV2DecoderLayerImpl::can_keep_local_output(
+    const PostAttnCarrier& carrier,
+    ProcessGroup* pg) const {
+  const bool can_use_sp_fast = carrier.mode == PostAttnMode::kPackedLocal &&
+                               sequence_parallel_context_ != nullptr &&
+                               sequence_parallel_context_->comm_plan.ffn_can_rs;
+  if (!can_use_sp_fast) {
+    return false;
+  }
+
+  ProcessGroup* const sp_pg = sequence_parallel_context_->process_group;
+  if (!pg || pg->world_size() <= 1 || pg == sp_pg) {
+    return true;
+  }
+
+  if (parallel_args_.dp_size() != 1 || !is_sp_alias_pg(pg, parallel_args_)) {
+    return false;
+  }
+
+  return same_sp_topology(pg, sp_pg);
+}
+
+torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
+    torch::Tensor x,
+    const PostAttnCarrier& carrier,
+    ProcessGroup* pg) const {
+  if (!can_keep_local_output(carrier, pg)) {
+    return reduce_out(x, pg);
+  }
+
+  if (pg && pg->world_size() > 1) {
+    return parallel_state::reduce_scatter(x, pg);
+  }
+
+  CHECK(sequence_parallel_context_ != nullptr)
+      << "sequence parallel fast path requires sequence parallel context";
+  return v32_sp::slice_local_packed(x, *sequence_parallel_context_);
+}
+
 torch::Tensor DeepseekV2DecoderLayerImpl::restore_ffn_output(
     torch::Tensor x,
     const PostAttnCarrier& carrier,
@@ -305,30 +354,39 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
   x = materialize_ffn_input(carrier, input_params);
 
   // MLP forward
+  bool keep_local_output = false;
+  auto comm_ffn = [&](torch::Tensor y, ProcessGroup* pg) {
+    return keep_local_output ? comm_out(y, carrier, pg) : reduce_out(y, pg);
+  };
   if (moe_mlp_) {
+    ProcessGroup* routed_pg = parallel_args_.ep_size() > 1
+                                  ? parallel_args_.moe_ep_group_
+                                  : parallel_args_.tp_group_;
+    keep_local_output = !enable_moe_all2all &&
+                        can_keep_local_output(carrier, routed_pg) &&
+                        can_keep_local_output(carrier, moe_mlp_->shared_pg());
     torch::Tensor shared_out;
     if (!enable_moe_all2all) {
       shared_out = moe_mlp_->forward_shared(x);
       if (shared_out.defined()) {
-        shared_out = reduce_out(shared_out, moe_mlp_->shared_pg());
+        shared_out = comm_ffn(shared_out, moe_mlp_->shared_pg());
       }
     }
     x = moe_mlp_->forward_experts(x, enable_moe_all2all);
     if (!enable_moe_all2all) {
-      if (parallel_args_.ep_size() > 1) {
-        x = reduce_out(x, parallel_args_.moe_ep_group_);
-      } else {
-        x = reduce_out(x, parallel_args_.tp_group_);
-      }
+      x = comm_ffn(x, routed_pg);
       if (shared_out.defined()) {
         x = x + shared_out;
       }
     }
   } else {
+    keep_local_output =
+        can_keep_local_output(carrier, parallel_args_.tp_group_);
     x = mlp_(x);
-    x = reduce_out(x, parallel_args_.tp_group_);
+    x = comm_ffn(x, parallel_args_.tp_group_);
   }
-  x = restore_ffn_output(x, carrier, input_params);
+  x = keep_local_output ? x + carrier.skip_local
+                        : restore_ffn_output(x, carrier, input_params);
 
   residual = std::nullopt;
   return x;

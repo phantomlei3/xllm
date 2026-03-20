@@ -88,6 +88,11 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   torch::Tensor materialize_ffn_input(const PostAttnCarrier& carrier,
                                       const ModelInputParams& input_params);
 
+  bool can_keep_local_output(const PostAttnCarrier& carrier,
+                             ProcessGroup* pg) const;
+  torch::Tensor comm_out(torch::Tensor x,
+                         const PostAttnCarrier& carrier,
+                         ProcessGroup* pg) const;
   torch::Tensor restore_ffn_output(torch::Tensor x,
                                    const PostAttnCarrier& carrier,
                                    const ModelInputParams& input_params);
