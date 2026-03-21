@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "deepseek_v2_sparse_moe_block.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "common/global_flags.h"
@@ -23,6 +24,14 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+namespace {
+
+bool need_chunk(const torch::Tensor& x, int64_t chunk_size) {
+  return chunk_size > 0 && x.defined() && x.dim() > 0 && x.size(0) > chunk_size;
+}
+
+}  // namespace
 
 DeepseekV2SparseMoEBlockImpl::DeepseekV2SparseMoEBlockImpl(
     const ModelArgs& model_args,
@@ -179,10 +188,29 @@ ProcessGroup* DeepseekV2SparseMoEBlockImpl::routed_pg() const {
                                       : parallel_args_.tp_group_;
 }
 
+torch::Tensor DeepseekV2SparseMoEBlockImpl::run_routed(torch::Tensor x,
+                                                       int64_t chunk_size) {
+  if (!need_chunk(x, chunk_size)) {
+    return moe_->forward_experts(x, /*enable_all2all_communication=*/false);
+  }
+
+  auto out_sizes = x.sizes().vec();
+  torch::Tensor full_out = torch::empty(out_sizes, x.options());
+  for (int64_t start = 0; start < x.size(0); start += chunk_size) {
+    const int64_t end = std::min(start + chunk_size, x.size(0));
+    torch::Tensor chunk_out =
+        moe_->forward_experts(x.slice(0, start, end),
+                              /*enable_all2all_communication=*/false);
+    full_out.slice(0, start, end).copy_(chunk_out, /*non_blocking=*/true);
+  }
+  return full_out;
+}
+
 DeepseekV2SparseMoEBlockImpl::ForwardResult
 DeepseekV2SparseMoEBlockImpl::forward(torch::Tensor x,
                                       bool enable_moe_all2all,
-                                      const CommFns& comm_fns) {
+                                      const CommFns& comm_fns,
+                                      int64_t chunk_size) {
   if (enable_moe_all2all) {
     return ForwardResult{
         .output =
@@ -203,7 +231,7 @@ DeepseekV2SparseMoEBlockImpl::forward(torch::Tensor x,
     shared_out = comm_fns.comm(shared_out, shared_group);
   }
 
-  x = moe_->forward_experts(x, /*enable_all2all_communication=*/false);
+  x = run_routed(std::move(x), chunk_size);
   x = keep_local_output ? comm_fns.comm(x, routed_group)
                         : comm_fns.reduce(x, routed_group);
   if (shared_out.defined()) {
@@ -219,7 +247,8 @@ DeepseekV2SparseMoEBlockImpl::ForwardResult
 DeepseekV2SparseMoEBlockImpl::forward_sp(
     torch::Tensor x,
     const v32_sp::DeepseekV32SPContext& sp_ctx,
-    const CommFns& comm_fns) {
+    const CommFns& comm_fns,
+    int64_t chunk_size) {
   CHECK(has_shared()) << "forward_sp requires shared experts";
   ProcessGroup* routed_group = routed_pg();
   const bool keep_local_output = comm_fns.can_keep_local(routed_group);
@@ -228,7 +257,8 @@ DeepseekV2SparseMoEBlockImpl::forward_sp(
         v32_sp::launch_all_gather_across_ranks(x, sp_ctx));
     return forward(std::move(gathered),
                    /*enable_moe_all2all=*/false,
-                   comm_fns);
+                   comm_fns,
+                   chunk_size);
   }
 
   moe_->init_async(x);
@@ -250,8 +280,7 @@ DeepseekV2SparseMoEBlockImpl::forward_sp(
   current_stream->wait_stream(*comm_stream);
   auto gathered =
       v32_sp::finish_all_gather_across_ranks(std::move(gather_handle));
-  auto routed_out =
-      moe_->forward_experts(gathered, /*enable_all2all_communication=*/false);
+  auto routed_out = run_routed(std::move(gathered), chunk_size);
   routed_out = comm_fns.comm(std::move(routed_out), routed_group);
   return ForwardResult{
       .output = routed_out + shared_out,

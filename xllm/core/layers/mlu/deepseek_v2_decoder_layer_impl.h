@@ -53,6 +53,10 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   void set_sequence_parallel_context(
       const v32_sp::DeepseekV32SPContext* sp_ctx) {
     sequence_parallel_context_ = sp_ctx;
+    // 8192 is a magic number chosen empirically to balance memory savings for
+    // long sequence scenarios when Sequence Parallel is enabled. It helps
+    // reduce memory consumption in those cases.
+    sp_ffn_chunk_size_ = sp_ctx != nullptr ? 8192 : -1;
   }
 
   torch::Tensor forward(torch::Tensor& x,
@@ -84,9 +88,11 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
 
   bool can_keep_local_output(const PostAttnCarrier& carrier,
                              ProcessGroup* pg) const;
+  bool can_sp_chunk(const ModelInputParams& input_params) const;
   torch::Tensor comm_out(torch::Tensor x,
                          const PostAttnCarrier& carrier,
                          ProcessGroup* pg) const;
+  torch::Tensor run_mlp(torch::Tensor x, const ModelInputParams& input_params);
   torch::Tensor restore_ffn_output(torch::Tensor x,
                                    const PostAttnCarrier& carrier);
   torch::Tensor reduce_out(torch::Tensor x, ProcessGroup* pg) const;
@@ -103,6 +109,7 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
   const v32_sp::DeepseekV32SPContext* sequence_parallel_context_ = nullptr;
+  int64_t sp_ffn_chunk_size_ = -1;
 };
 
 TORCH_MODULE(DeepseekV2DecoderLayer);

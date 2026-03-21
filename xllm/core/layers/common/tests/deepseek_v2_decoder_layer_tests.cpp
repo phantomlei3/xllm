@@ -105,6 +105,21 @@ class DeepseekV2DecoderLayerTestPeer {
     return decoder.mlp_;
   }
 
+  static torch::Tensor run_mlp(DeepseekV2DecoderLayerImpl& decoder,
+                               torch::Tensor x,
+                               const ModelInputParams& input_params) {
+    return decoder.run_mlp(std::move(x), input_params);
+  }
+
+  static int64_t sp_ffn_chunk(DeepseekV2DecoderLayerImpl& decoder) {
+    return decoder.sp_ffn_chunk_size_;
+  }
+
+  static void set_sp_ffn_chunk(DeepseekV2DecoderLayerImpl& decoder,
+                               int64_t chunk_size) {
+    decoder.sp_ffn_chunk_size_ = chunk_size;
+  }
+
   static torch::Tensor reduce_out(DeepseekV2DecoderLayerImpl& decoder,
                                   torch::Tensor x,
                                   ProcessGroup* pg) {
@@ -642,6 +657,9 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.dp_local_process_group_ = dp_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
+    parallel_args_.single_rank_group_ =
+        tp_size > 1 ? build_single_rank_pg() : tp_pg_.get();
+    parallel_args_.sp_group_ = tp_pg_.get();
     refresh_ctx();
   }
 
@@ -658,6 +676,9 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.dp_local_process_group_ = nullptr;
     parallel_args_.tp_group_ = tp_pg_.get();
+    parallel_args_.single_rank_group_ =
+        world_size > 1 ? build_single_rank_pg() : tp_pg_.get();
+    parallel_args_.sp_group_ = tp_pg_.get();
     refresh_ctx();
   }
 
@@ -675,9 +696,17 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.dp_local_process_group_ = dp_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
+    parallel_args_.single_rank_group_ = tp_pg_.get();
+    parallel_args_.sp_group_ = tp_pg_.get();
     parallel_args_.moe_ep_group_ = global_pg_.get();
     parallel_args_.moe_tp_group_ = tp_pg_.get();
     refresh_ctx();
+  }
+
+  ProcessGroup* build_single_rank_pg() {
+    single_rank_pg_ = std::make_unique<test::MockProcessGroup>(
+        options_.device(), /*rank=*/0, /*world_size=*/1);
+    return single_rank_pg_.get();
   }
 
   void set_sp_ctx(DecoderHolder& decoder,
@@ -809,6 +838,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
   std::unique_ptr<test::MockProcessGroup> global_pg_;
   std::unique_ptr<test::MockProcessGroup> dp_pg_;
   std::unique_ptr<test::MockProcessGroup> tp_pg_;
+  std::unique_ptr<test::MockProcessGroup> single_rank_pg_;
   std::unique_ptr<test::MockProcessGroup> sp_pg_;
   ModelContext context_{};
   v32_sp::DeepseekV32SPContext sp_ctx_{};
@@ -1378,6 +1408,47 @@ TEST_F(DeepseekV2DecoderLayerTest, DenseMlpReductionMovesToDecoder) {
 
   EXPECT_EQ(tp_pg_raw->allreduce_calls(), 1);
   EXPECT_EQ(reduced_out.sizes(), local_out.sizes());
+}
+
+TEST_F(DeepseekV2DecoderLayerTest, DenseMlpChunkMatchesDirectPrefill) {
+  auto decoder = make_loaded_decoder(/*layer_id=*/0);
+  set_sp_ctx(decoder);
+  DeepseekV2DecoderLayerTestPeer::set_sp_ffn_chunk(*decoder, /*chunk_size=*/2);
+
+  auto hidden_states = test::seeded_tensor("deepseek_v2_decoder.chunk_prefill",
+                                           {5, model_args_.hidden_size()},
+                                           torch::kBFloat16,
+                                           options_.device());
+  auto input_params = build_prefill_params(/*batch_size=*/1, /*seq_len=*/5);
+
+  auto expected =
+      DeepseekV2DecoderLayerTestPeer::mlp(*decoder)->forward(hidden_states);
+  auto actual = DeepseekV2DecoderLayerTestPeer::run_mlp(
+      *decoder, hidden_states, input_params);
+
+  sync_dev();
+  test::verify_tensor_close(actual, expected, 1e-3, 1e-4);
+}
+
+TEST_F(DeepseekV2DecoderLayerTest, DenseMlpChunkMatchesDirectChunkedPrefill) {
+  auto decoder = make_loaded_decoder(/*layer_id=*/0);
+  set_sp_ctx(decoder);
+  DeepseekV2DecoderLayerTestPeer::set_sp_ffn_chunk(*decoder, /*chunk_size=*/2);
+
+  auto hidden_states = test::seeded_tensor("deepseek_v2_decoder.chunk_chunked",
+                                           {5, model_args_.hidden_size()},
+                                           torch::kBFloat16,
+                                           options_.device());
+  auto input_params = build_prefill_params(/*batch_size=*/1, /*seq_len=*/5);
+  input_params.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+
+  auto expected =
+      DeepseekV2DecoderLayerTestPeer::mlp(*decoder)->forward(hidden_states);
+  auto actual = DeepseekV2DecoderLayerTestPeer::run_mlp(
+      *decoder, hidden_states, input_params);
+
+  sync_dev();
+  test::verify_tensor_close(actual, expected, 1e-3, 1e-4);
 }
 
 TEST_P(DeepseekV2DecoderLayerParamTest,
