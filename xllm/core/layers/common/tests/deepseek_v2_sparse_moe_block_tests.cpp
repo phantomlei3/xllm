@@ -447,6 +447,70 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardReducePathCombinesSharedAndRouted) {
   test::verify_tensor_close(result.output, expected, 1e-3, 1e-4);
 }
 
+TEST_F(DeepseekV2SparseMoEBlockTest, ForwardReduceOverlapUsesAsyncReduceFns) {
+  auto block = create_block();
+  auto raw_moe = create_raw_moe();
+  StateDict state_dict(create_fp_weights(/*n_shared_experts=*/1));
+  block->load_state_dict(state_dict);
+  raw_moe->load_state_dict(state_dict);
+
+  auto hidden_states =
+      test::seeded_tensor("deepseek_v2_sparse_moe_block.async_reduce",
+                          {4, model_args_.hidden_size()},
+                          torch::kBFloat16,
+                          options_.device());
+  auto routed = raw_moe->forward_experts(
+      hidden_states, /*enable_all2all_communication=*/false);
+  auto shared = raw_moe->forward_shared(hidden_states);
+  ASSERT_TRUE(shared.defined());
+
+  int comm_calls = 0;
+  int reduce_calls = 0;
+  int launch_reduce_calls = 0;
+  int finish_reduce_calls = 0;
+  auto result = block->forward(
+      hidden_states,
+      /*enable_moe_all2all=*/false,
+      DeepseekV2SparseMoEBlockImpl::CommFns{
+          .can_keep_local = std::function<bool(ProcessGroup*)>(
+              [](ProcessGroup*) { return false; }),
+          .comm = std::function<torch::Tensor(torch::Tensor, ProcessGroup*)>(
+              [&](torch::Tensor x, ProcessGroup* pg) {
+                ++comm_calls;
+                return run_comm(std::move(x), pg);
+              }),
+          .reduce = std::function<torch::Tensor(torch::Tensor, ProcessGroup*)>(
+              [&](torch::Tensor x, ProcessGroup* pg) {
+                ++reduce_calls;
+                return run_reduce(std::move(x), pg);
+              }),
+          .launch_reduce = std::function<parallel_state::ReduceAsyncCtx(
+              torch::Tensor, ProcessGroup*)>(
+              [&](torch::Tensor x, ProcessGroup* pg) {
+                ++launch_reduce_calls;
+                return parallel_state::ReduceAsyncCtx{
+                    .tensor = run_reduce(std::move(x), pg),
+                };
+              }),
+          .finish_reduce =
+              std::function<torch::Tensor(parallel_state::ReduceAsyncCtx)>(
+                  [&](parallel_state::ReduceAsyncCtx ctx) {
+                    ++finish_reduce_calls;
+                    return std::move(ctx.tensor);
+                  }),
+      });
+
+  sync_dev();
+
+  auto expected = run_reduce(routed, tp_pg_.get()) + shared;
+  EXPECT_FALSE(result.keep_local_output);
+  EXPECT_EQ(comm_calls, 0);
+  EXPECT_EQ(reduce_calls, 0);
+  EXPECT_EQ(launch_reduce_calls, 1);
+  EXPECT_EQ(finish_reduce_calls, 1);
+  test::verify_tensor_close(result.output, expected, 1e-3, 1e-4);
+}
+
 TEST_F(DeepseekV2SparseMoEBlockTest, ForwardKeepLocalUsesCommPath) {
   auto block = create_block();
   auto raw_moe = create_raw_moe();

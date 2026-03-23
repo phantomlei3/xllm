@@ -23,6 +23,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
+#include "framework/parallel_state/parallel_state.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/common/dp_utils.h"
@@ -53,6 +54,9 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
     std::function<bool(ProcessGroup*)> can_keep_local;
     std::function<torch::Tensor(torch::Tensor, ProcessGroup*)> comm;
     std::function<torch::Tensor(torch::Tensor, ProcessGroup*)> reduce;
+    std::function<parallel_state::ReduceAsyncCtx(torch::Tensor, ProcessGroup*)>
+        launch_reduce;
+    std::function<torch::Tensor(parallel_state::ReduceAsyncCtx)> finish_reduce;
   };
 
   struct ForwardResult {

@@ -223,6 +223,38 @@ DeepseekV2SparseMoEBlockImpl::forward(torch::Tensor x,
   ProcessGroup* shared_group = moe_->shared_pg();
   const bool keep_local_output = comm_fns.can_keep_local(routed_group);
 
+  const bool can_overlap_reduce = !keep_local_output && moe_->has_shared() &&
+                                  static_cast<bool>(comm_fns.launch_reduce) &&
+                                  static_cast<bool>(comm_fns.finish_reduce);
+  if (can_overlap_reduce) {
+    moe_->init_async(x);
+    Stream* comm_stream = moe_->routed_stream();
+    CHECK(comm_stream != nullptr) << "forward overlap requires routed stream";
+
+    Device device(x.device());
+    auto current_stream = device.current_stream();
+    auto routed_out = run_routed(x, chunk_size);
+
+    parallel_state::ReduceAsyncCtx reduce_handle;
+    comm_stream->wait_stream(*current_stream);
+    {
+      torch::StreamGuard stream_guard = comm_stream->set_stream_guard();
+      reduce_handle =
+          comm_fns.launch_reduce(std::move(routed_out), routed_group);
+    }
+
+    torch::Tensor shared_out = moe_->forward_shared(x);
+    current_stream->wait_stream(*comm_stream);
+    x = comm_fns.finish_reduce(std::move(reduce_handle));
+    if (shared_out.defined()) {
+      x = x + shared_out;
+    }
+    return ForwardResult{
+        .output = std::move(x),
+        .keep_local_output = false,
+    };
+  }
+
   torch::Tensor shared_out = moe_->forward_shared(x);
   if (shared_out.defined() && keep_local_output) {
     // we assume that share experts use full weights for deepseek models

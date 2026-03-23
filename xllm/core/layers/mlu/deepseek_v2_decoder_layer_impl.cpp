@@ -316,6 +316,14 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
             [&](torch::Tensor y, ProcessGroup* pg) {
               return reduce_out(std::move(y), pg);
             },
+        .launch_reduce =
+            [&](torch::Tensor y, ProcessGroup* pg) {
+              return parallel_state::launch_reduce(std::move(y), pg);
+            },
+        .finish_reduce =
+            [&](parallel_state::ReduceAsyncCtx ctx) {
+              return parallel_state::finish_reduce(std::move(ctx));
+            },
     };
     auto moe_result =
         use_sp_moe_overlap
