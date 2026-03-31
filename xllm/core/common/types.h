@@ -217,7 +217,8 @@ struct InstanceInfo {
   std::vector<std::string> addrs;
   std::vector<int64_t> k_cache_ids;
   std::vector<int64_t> v_cache_ids;
-  int32_t dp_size;
+  int32_t dp_size = 1;
+  int32_t tp_size = 1;
   // device network info
   std::vector<std::string> device_ips;
   std::vector<uint16_t> ports;
@@ -259,6 +260,7 @@ struct InstanceInfo {
     json_val["k_cache_ids"] = k_cache_ids;
     json_val["v_cache_ids"] = v_cache_ids;
     json_val["dp_size"] = dp_size;
+    json_val["tp_size"] = tp_size;
     json_val["device_ips"] = device_ips;
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;

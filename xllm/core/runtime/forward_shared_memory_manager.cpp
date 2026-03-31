@@ -132,7 +132,8 @@ inline size_t get_instance_info_size(const InstanceInfo& info) {
 
   size += type_size<uint64_t> + info.k_cache_ids.size() * type_size<int64_t> +
           type_size<uint64_t> + info.v_cache_ids.size() * type_size<int64_t> +
-          type_size<int32_t>  // dp_size
+          type_size<int32_t>    // dp_size
+          + type_size<int32_t>  // tp_size
           + type_size<uint64_t> +
           info.ttft_profiling_data.size() *
               (type_size<int32_t> + type_size<int64_t>);
@@ -482,6 +483,7 @@ inline void write_instance_info(char*& buffer, const InstanceInfo& info) {
   write_vector(buffer, info.k_cache_ids);
   write_vector(buffer, info.v_cache_ids);
   write_data(buffer, info.dp_size);
+  write_data(buffer, info.tp_size);
 
   const uint64_t prof_size = info.ttft_profiling_data.size();
   write_data(buffer, prof_size);
@@ -868,6 +870,7 @@ inline void read_instance_info(const char*& buffer, InstanceInfo& info) {
   read_vector(buffer, info.k_cache_ids);
   read_vector(buffer, info.v_cache_ids);
   read_data(buffer, info.dp_size);
+  read_data(buffer, info.tp_size);
 
   uint64_t prof_size;
   read_data(buffer, prof_size);

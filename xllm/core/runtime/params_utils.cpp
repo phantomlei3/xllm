@@ -334,6 +334,9 @@ void proto_to_forward_input(const proto::ForwardInput* pb_forward_input,
     instance_info.dp_size = pb_forward_input->transfer_kv_infos()[i]
                                 .remote_instance_info()
                                 .dp_size();
+    instance_info.tp_size = pb_forward_input->transfer_kv_infos()[i]
+                                .remote_instance_info()
+                                .tp_size();
 
     transfer_kv_info.remote_instance_info = std::move(instance_info);
 
@@ -481,6 +484,8 @@ void forward_input_to_proto(const RawForwardInput& inputs,
                           transfer_kv_info.remote_instance_info.v_cache_ids);
       pb_transfer_kv_info->mutable_remote_instance_info()->set_dp_size(
           transfer_kv_info.remote_instance_info.dp_size);
+      pb_transfer_kv_info->mutable_remote_instance_info()->set_tp_size(
+          transfer_kv_info.remote_instance_info.tp_size);
 
       // XTensor mode: write dst_xtensor_layer_offsets
       for (const auto& layer_offsets :

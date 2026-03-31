@@ -71,6 +71,23 @@ size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
   return util::max(free_blocks);
 }
 
+int32_t get_tp_size(int32_t nnodes, int32_t dp_size, int32_t cp_size) {
+  if (dp_size <= 0 || cp_size <= 0) {
+    LOG(WARNING) << "Invalid topology config, fallback tp_size=1. dp_size="
+                 << dp_size << ", cp_size=" << cp_size;
+    return 1;
+  }
+
+  const int32_t topo_size = dp_size * cp_size;
+  if (topo_size <= 0 || nnodes < topo_size || nnodes % topo_size != 0) {
+    LOG(WARNING) << "Invalid topology config, fallback tp_size=1. nnodes="
+                 << nnodes << ", dp_size=" << dp_size
+                 << ", cp_size=" << cp_size;
+    return 1;
+  }
+  return nnodes / topo_size;
+}
+
 }  // namespace
 
 namespace {
@@ -144,6 +161,8 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
   instance_info_.name = options_.instance_name().value_or("");
   instance_info_.type = options_.instance_role().value().to_string();
   instance_info_.dp_size = options.dp_size();
+  instance_info_.tp_size =
+      get_tp_size(options_.nnodes(), options_.dp_size(), options_.cp_size());
 
   if (options_.enable_schedule_overlap()) {
     min_speculative_tokens_required_ = options_.num_speculative_tokens() * 2;

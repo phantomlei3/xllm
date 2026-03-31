@@ -116,7 +116,9 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name,
   instance_info_.type = options_.instance_role().value().to_string();
   LOG(INFO) << "Instance info: instance name = " << instance_info_.name
             << ", instance rpc_address = " << instance_info_.rpc_address
-            << ", instance type = " << instance_info_.type;
+            << ", instance type = " << instance_info_.type
+            << ", tp_size = " << instance_info_.tp_size
+            << ", dp_size = " << options_.dp_size();
 
   engine->get_cache_info(instance_info_.cluster_ids,
                          instance_info_.addrs,

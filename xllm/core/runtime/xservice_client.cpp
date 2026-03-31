@@ -220,6 +220,9 @@ void XServiceClient::reconcile_registration_loop() {
 void XServiceClient::register_instance(const InstanceInfo& instance_info) {
   InstanceInfo registered_info = instance_info;
   registered_info.incarnation_id = incarnation_id_;
+  if (registered_info.tp_size <= 0) {
+    registered_info.tp_size = 1;
+  }
   if (registered_info.register_ts_ms == 0) {
     registered_info.register_ts_ms =
         static_cast<uint64_t>(absl::ToUnixMillis(absl::Now()));
@@ -257,7 +260,10 @@ void XServiceClient::register_instance(const InstanceInfo& instance_info) {
   }
 
   register_done_.store(true);
-  LOG(INFO) << "Success register instance to etcd.";
+  LOG(INFO) << "Success register instance to etcd. name="
+            << registered_info.name << ", type=" << registered_info.type
+            << ", tp_size=" << registered_info.tp_size
+            << ", dp_size=" << registered_info.dp_size;
 }
 
 InstanceInfo XServiceClient::get_instance_info(
@@ -309,6 +315,7 @@ InstanceInfo XServiceClient::get_instance_info(
     result.v_cache_ids.emplace_back(v_cache_id);
   }
   result.dp_size = resp.dp_size();
+  result.tp_size = std::max(resp.tp_size(), 1);
   for (auto& ip : resp.device_ips()) {
     result.device_ips.emplace_back(ip);
   }

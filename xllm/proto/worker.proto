@@ -127,6 +127,7 @@ message InstanceInfo {
   repeated int64 k_cache_ids = 5;
   repeated int64 v_cache_ids = 6;
   int32 dp_size = 7;
+  int32 tp_size = 9;
 }
 
 message TransferKVInfo {
