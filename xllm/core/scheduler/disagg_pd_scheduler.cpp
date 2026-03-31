@@ -24,9 +24,11 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/macros.h"
+#include "common/pd_topo.h"
 #include "disagg_pd.pb.h"
 #include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
+#include "distributed_runtime/llm_engine.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -729,6 +731,43 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       return false;
     }
 
+#if defined(USE_MLU)
+    const auto* llm_engine = dynamic_cast<const LLMEngine*>(engine_);
+    const bool enable_mla = llm_engine != nullptr
+                                ? llm_engine->options().enable_mla()
+                                : engine_->model_args().enable_mla();
+    const int32_t src_world_size = src_cluster_ids.size();
+    const int32_t dst_world_size = instance_info_.cluster_ids.size();
+    auto topo = check_mlu_pd_topo(src_world_size,
+                                  src_dp_size,
+                                  dst_world_size,
+                                  options_.dp_size(),
+                                  options_.cp_size(),
+                                  enable_mla);
+    if (!topo.ok()) {
+      LOG(ERROR) << (enable_mla ? "MLA PD decode pull "
+                                : "Non-MLA PD decode pull ")
+                 << pd_topo_stat_str(topo.stat, enable_mla)
+                 << ", req_id=" << req_id << ", src_dp_size=" << src_dp_size
+                 << ", src_tp_size=" << topo.topo.src_tp_size
+                 << ", src_world_size=" << src_world_size
+                 << ", dst_dp_size=" << options_.dp_size()
+                 << ", dst_tp_size=" << topo.topo.dst_tp_size
+                 << ", dst_world_size=" << dst_world_size
+                 << ", dst_cp_size=" << options_.cp_size();
+      kv_cache_manager_->deallocate(request.get());
+      return false;
+    }
+
+    LOG(INFO) << (enable_mla ? "MLA PD decode pull topology accepted"
+                             : "Non-MLA PD homogeneous topology accepted")
+              << ", req_id=" << req_id
+              << ", src_dp_size=" << topo.topo.src_dp_size
+              << ", src_tp_size=" << topo.topo.src_tp_size
+              << ", dst_dp_size=" << topo.topo.dst_dp_size
+              << ", dst_tp_size=" << topo.topo.dst_tp_size
+              << ", dst_cp_size=" << topo.topo.dst_cp_size;
+#endif
     int32_t dst_dp_rank = request->sequences()[0]->dp_rank();
     const bool pull_success = engine_->pull_kv_blocks(src_dp_size,
                                                       src_dp_rank,

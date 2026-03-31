@@ -12,6 +12,7 @@ cc_library(
     macros.h
     message.h
     metrics.h
+    pd_topo.h
     $<$<BOOL:${USE_NPU}>:mspti_helper.h>
     options.h
     rate_limiter.h
@@ -65,6 +66,16 @@ cc_test(
     GTest::gtest_main
     gflags::gflags
     glog::glog
+)
+
+cc_test(
+  NAME
+    pd_topo_test
+  SRCS
+    pd_topo_test.cpp
+  DEPS
+    common
+    GTest::gtest_main
 )
 target_link_libraries(common PRIVATE OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)
 add_dependencies(common brpc-static)

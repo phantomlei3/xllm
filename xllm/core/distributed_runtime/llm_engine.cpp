@@ -32,6 +32,7 @@ limitations under the License.
 #include "common/interruption_bus.h"
 #include "common/metrics.h"
 #include "common/options.h"
+#include "common/pd_topo.h"
 #include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
@@ -714,43 +715,74 @@ bool LLMEngine::pull_kv_blocks(const int32_t src_dp_size,
 
   const int32_t src_tp_size = src_world_size / src_dp_size;
   const int32_t dst_world_size = worker_clients_num_;
-  int32_t dst_tp_size = dst_world_size / dp_size_;
+  const int32_t dst_tp_size = dst_world_size / dp_size_;
+  PdTopoInfo topo_info;
+  topo_info.src_world_size = src_world_size;
+  topo_info.src_dp_size = src_dp_size;
+  topo_info.src_tp_size = src_tp_size;
+  topo_info.dst_world_size = dst_world_size;
+  topo_info.dst_dp_size = dp_size_;
+  topo_info.dst_tp_size = dst_tp_size;
+  topo_info.dst_cp_size = cp_size_;
 
 #if defined(USE_MLU)
-  if (options_.enable_mla() && (src_dp_size != static_cast<int32_t>(dp_size_) ||
-                                src_tp_size != dst_tp_size)) {
-    LOG(ERROR) << "MLA PD pull only supports homogeneous topology"
-               << ", src_dp_size=" << src_dp_size
-               << ", src_tp_size=" << src_tp_size
-               << ", dst_dp_size=" << dp_size_
-               << ", dst_tp_size=" << dst_tp_size;
-    return false;
+  {
+    auto topo = check_mlu_pd_topo(src_world_size,
+                                  src_dp_size,
+                                  dst_world_size,
+                                  dp_size_,
+                                  cp_size_,
+                                  options_.enable_mla());
+    if (!topo.ok()) {
+      LOG(ERROR) << (options_.enable_mla() ? "MLA PD pull "
+                                           : "Non-MLA PD pull ")
+                 << pd_topo_stat_str(topo.stat, options_.enable_mla())
+                 << ", src_dp_rank=" << src_dp_rank
+                 << ", dst_dp_rank=" << dst_dp_rank
+                 << ", src_world_size=" << src_world_size
+                 << ", dst_world_size=" << dst_world_size
+                 << ", src_dp_size=" << src_dp_size
+                 << ", src_tp_size=" << topo.topo.src_tp_size
+                 << ", dst_dp_size=" << dp_size_
+                 << ", dst_tp_size=" << topo.topo.dst_tp_size
+                 << ", dst_cp_size=" << cp_size_;
+      return false;
+    }
+    topo_info = topo.topo;
+
+    LOG(INFO) << (options_.enable_mla()
+                      ? "MLA PD pull topology accepted"
+                      : "Non-MLA PD homogeneous topology accepted")
+              << ", src_dp_rank=" << src_dp_rank
+              << ", dst_dp_rank=" << dst_dp_rank
+              << ", src_world_size=" << topo.topo.src_world_size
+              << ", dst_world_size=" << topo.topo.dst_world_size
+              << ", src_tp_size=" << topo.topo.src_tp_size
+              << ", dst_tp_size=" << topo.topo.dst_tp_size;
   }
 #endif
 
   std::vector<bool> results;
   results.reserve(dst_tp_size);
   // Pull the KV cache for all workers in the current DP rank.
-  for (size_t tp_rank = 0; tp_rank < dst_tp_size; ++tp_rank) {
-    int32_t dst_worker_rank = dst_dp_rank * dst_tp_size + tp_rank;
-    // Determine the ranks of the remote workers connected to the current
-    // worker.
-    int32_t src_dp_worker_rank = dst_worker_rank % src_tp_size;
-    int32_t src_worker_rank = src_dp_rank * src_tp_size + src_dp_worker_rank;
-    if (dst_worker_rank >= static_cast<int32_t>(worker_clients_num_) ||
-        src_worker_rank >= src_world_size) {
+  for (int32_t tp_rank = 0; tp_rank < dst_tp_size; ++tp_rank) {
+    PdPullMap pull_map;
+    if (!get_pd_pull_map(
+            topo_info, src_dp_rank, dst_dp_rank, tp_rank, &pull_map)) {
       LOG(ERROR) << "pull_kv_blocks worker rank out of range"
-                 << ", src_worker_rank=" << src_worker_rank
+                 << ", src_worker_rank=" << pull_map.src_worker_rank
                  << ", src_world_size=" << src_world_size
-                 << ", dst_worker_rank=" << dst_worker_rank
-                 << ", dst_world_size=" << worker_clients_num_;
+                 << ", dst_worker_rank=" << pull_map.dst_worker_rank
+                 << ", dst_world_size=" << worker_clients_num_
+                 << ", src_dp_rank=" << src_dp_rank
+                 << ", dst_dp_rank=" << dst_dp_rank << ", tp_rank=" << tp_rank;
       return false;
     }
-    results.push_back(worker_clients_[dst_worker_rank]->pull_kv_blocks(
-        src_cluster_ids[src_worker_rank],
-        src_addrs[src_worker_rank],
-        src_k_cache_ids[src_worker_rank],
-        src_v_cache_ids[src_worker_rank],
+    results.push_back(worker_clients_[pull_map.dst_worker_rank]->pull_kv_blocks(
+        src_cluster_ids[pull_map.src_worker_rank],
+        src_addrs[pull_map.src_worker_rank],
+        src_k_cache_ids[pull_map.src_worker_rank],
+        src_v_cache_ids[pull_map.src_worker_rank],
         src_blocks,
         dst_blocks));
   }
@@ -880,6 +912,13 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
   int32_t src_world_size = cluster_ids.size();
   int32_t src_tp_size = src_world_size / src_dp_size;
 
+  LOG(INFO) << "link_cluster topology"
+            << ", src_world_size=" << src_world_size
+            << ", src_dp_size=" << src_dp_size
+            << ", src_tp_size=" << src_tp_size
+            << ", dst_world_size=" << worker_clients_num_
+            << ", dst_dp_size=" << dp_size_;
+
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -894,8 +933,15 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
     dp_addrs.reserve(src_dp_size);
     dp_device_ips.reserve(src_dp_size);
     dp_ports.reserve(src_dp_size);
+    const int32_t src_tp_rank = src_dp_worker_index;
     for (int32_t i = 0; i < src_dp_size; ++i) {
       int32_t src_worker_index = i * src_tp_size + src_dp_worker_index;
+      LOG(INFO) << "link_cluster map"
+                << ", dst_worker_rank=" << worker_rank << ", src_dp_rank=" << i
+                << ", src_dp_worker_index=" << src_tp_rank
+                << ", src_worker_index=" << src_worker_index
+                << ", src_tp_size=" << src_tp_size
+                << ", dst_world_size=" << worker_clients_num_;
       dp_cluster_ids.emplace_back(cluster_ids[src_worker_index]);
       dp_addrs.emplace_back(addrs[src_worker_index]);
       dp_device_ips.emplace_back(device_ips[src_worker_index]);

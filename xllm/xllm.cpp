@@ -93,8 +93,11 @@ void validate_flags(const std::string& model_type) {
     if (FLAGS_enable_pd_ooc) {
       LOG(FATAL) << "MLU PD does not support PD OOC for now.";
     }
-    if (xllm::util::is_mla_model_type(model_type)) {
-      LOG(INFO) << "MLU PD MLA mode enabled: only homogeneous PD topology is "
+    if (FLAGS_backend != "dit" && xllm::util::is_mla_model_type(model_type)) {
+      LOG(INFO) << "MLU PD MLA mode: V1 supports pure heterogeneous TP "
+                   "topology only when dp=1 and cp=1.";
+    } else if (FLAGS_backend != "dit") {
+      LOG(INFO) << "MLU PD non-MLA mode: only homogeneous PD topology is "
                    "supported at runtime with Mooncake PULL.";
     }
   }
