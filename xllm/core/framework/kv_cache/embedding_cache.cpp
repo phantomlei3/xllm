@@ -24,6 +24,15 @@ limitations under the License.
 
 namespace xllm {
 
+namespace {
+
+bool has_seed(const EmbeddingCache::DecodeState& state) {
+  return state.token_id >= 0 && state.embedding.defined() &&
+         state.probs.defined();
+}
+
+}  // namespace
+
 EmbeddingCache::EmbeddingCache(int32_t total_nums) {
   CHECK_GT(total_nums, 0) << "No embeddings to allocate";
   decode_tails_.resize(total_nums);
@@ -69,6 +78,18 @@ void EmbeddingCache::write(const std::vector<int32_t>& ids,
 void EmbeddingCache::set_placeholder(
     const torch::Tensor& embedding_placeholder) {
   embedding_placeholder_ = embedding_placeholder;
+}
+
+std::vector<uint8_t> EmbeddingCache::build_seed_mask(
+    const std::vector<int32_t>& ids) const {
+  CHECK(!ids.empty()) << "decode ids should not be empty";
+  std::vector<uint8_t> mask;
+  mask.reserve(ids.size());
+  for (int32_t id : ids) {
+    const DecodeState& item = get_tail(id);
+    mask.emplace_back(has_seed(item) ? 1 : 0);
+  }
+  return mask;
 }
 
 ForwardOutput EmbeddingCache::read_for_decode(const std::vector<int32_t>& ids) {

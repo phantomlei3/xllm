@@ -81,4 +81,31 @@ TEST(EmbeddingCacheTest, WriteSelectedOnlyProbs) {
   EXPECT_TRUE(tensor_equal(output.sample_output.probs, cached_probs));
 }
 
+TEST(EmbeddingCacheTest, BuildSeedMaskMixedRows) {
+  torch::Device device(Device::type_torch(), 0);
+  EmbeddingCache cache(/*total_nums=*/3);
+
+  std::vector<int32_t> write_ids = {0, 2};
+  torch::Tensor cached_tokens = torch::tensor({11, 13}, torch::kInt);
+  torch::Tensor cached_embeddings = torch::tensor({{1.0f, 2.0f}, {3.0f, 4.0f}});
+  torch::Tensor cached_probs = torch::tensor({{0.1f, 0.9f}, {0.4f, 0.6f}});
+
+  cache.write(write_ids, cached_tokens, cached_embeddings, cached_probs);
+
+  std::vector<int32_t> read_ids = {0, 1, 2};
+  std::vector<uint8_t> mask = cache.build_seed_mask(read_ids);
+  EXPECT_EQ(mask, (std::vector<uint8_t>{1, 0, 1}));
+
+  cache.clear({2});
+  mask = cache.build_seed_mask(read_ids);
+  EXPECT_EQ(mask, (std::vector<uint8_t>{1, 0, 0}));
+
+  cache.write({2},
+              torch::tensor({23}, torch::kInt),
+              torch::tensor({{5.0f, 6.0f}}),
+              torch::tensor({{0.3f, 0.7f}}));
+  mask = cache.build_seed_mask(read_ids);
+  EXPECT_EQ(mask, (std::vector<uint8_t>{1, 0, 1}));
+}
+
 }  // namespace xllm

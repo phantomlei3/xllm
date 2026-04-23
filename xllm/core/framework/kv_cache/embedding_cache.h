@@ -51,6 +51,8 @@ class EmbeddingCache final {
 
   void set_placeholder(const torch::Tensor& embedding_placeholder);
 
+  std::vector<uint8_t> build_seed_mask(
+      const std::vector<int32_t>& embedding_ids) const;
   ForwardOutput read_for_decode(const std::vector<int32_t>& embedding_ids);
   std::vector<int32_t> read_correction_tokens(
       const std::vector<int32_t>& embedding_ids) const;

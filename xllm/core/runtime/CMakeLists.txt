@@ -134,6 +134,16 @@ endif()
 
 cc_test(
   NAME
+    mtp_worker_impl_test
+  SRCS
+    mtp_worker_impl_test.cpp
+  DEPS
+    :runtime
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     spec_input_builder_test
   SRCS
     spec_input_builder_test.cpp

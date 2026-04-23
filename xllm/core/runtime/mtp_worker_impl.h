@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "framework/kv_cache/embedding_cache.h"
+#include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
@@ -57,10 +58,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
-#if defined(USE_NPU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;
-#endif
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
 
@@ -72,15 +71,23 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   std::optional<ForwardOutput> step_decode_multi_step(
       const ForwardInput& input);
 
-  ForwardOutput prepare_last_output_for_decode(const ForwardInput& input);
+  ForwardOutput prepare_last_output_for_decode(const ForwardInput& input,
+                                               torch::Tensor& miss_mask);
   void fill_validate_input_from_draft_outputs(
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
+      const torch::Tensor& miss_mask,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input);
+  void patch_force_reject_rows(const ForwardOutput& target_output,
+                               const torch::Tensor& miss_mask,
+                               SampleOutput& sample_output);
 
+  // MTP decode expects validate() to return token-aligned embeddings so
+  // patch_force_reject_rows() and run_draft_extend() can rebuild next-step
+  // seeds from the validated target outputs.
   virtual SampleOutput validate(const SamplingParameters& sampling_params,
                                 const std::vector<ForwardOutput>& draft_outputs,
                                 const ForwardOutput& target_output);
@@ -128,8 +135,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
 
-#if defined(USE_NPU)
-  std::shared_ptr<SpecKVCacheTransfer> kv_cache_transfer_;
+#if defined(USE_NPU) || defined(USE_MLU)
+  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
 #endif
 };
 }  // namespace xllm

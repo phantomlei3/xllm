@@ -73,6 +73,11 @@ class MooncakeKVCacheTransferDefault final
                          const KVCacheShape& kv_cache_shape,
                          torch::ScalarType dtype) override;
 
+  void allocate_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
+                              const int64_t num_layers,
+                              const KVCacheShape& kv_cache_shape,
+                              torch::ScalarType dtype) override;
+
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
                          const torch::ScalarType dtype) override;
@@ -104,14 +109,22 @@ class MooncakeKVCacheTransferDefault final
                std::vector<void*>& addrs,
                std::vector<size_t>& lens,
                std::vector<uint64_t>& buf_bytes) const;
-  std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids) const;
+  std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids,
+                                   bool is_spec_draft) const;
 
   // Register per-layer K/V tensor memory.
-  void register_kv_cache_impl(std::vector<xllm::KVCache>& kv_caches);
+  void register_kv_cache_impl(const std::vector<xllm::KVCache>& kv_caches);
 
   bool has_v_cache_ = true;
   bool has_index_cache_ = false;
   int64_t buf_cnt_per_layer_ = 2;
+  bool main_registered_ = false;
+  int64_t spec_num_layers_ = 0;
+  bool spec_has_v_cache_ = true;
+  bool spec_has_index_cache_ = false;
+  int64_t spec_buf_cnt_per_layer_ = 2;
+  int64_t spec_buf_offset_ = 0;
+  bool spec_registered_ = false;
   std::string model_type_;
 };
 

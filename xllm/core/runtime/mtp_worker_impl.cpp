@@ -15,8 +15,13 @@ limitations under the License.
 
 #include "mtp_worker_impl.h"
 
+#include <algorithm>
+
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#if defined(USE_MLU)
+#include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
+#endif
 #include "framework/request/mm_data.h"
 #include "spec_input_builder.h"
 #include "util/env_var.h"
@@ -42,6 +47,59 @@ runtime::Options MTPDraftOptions(const runtime::Options& options) {
       .num_decoding_tokens(1)
       .num_speculative_tokens(0);
   return opts;
+}
+
+std::vector<int64_t> collect_rows(const std::vector<uint8_t>& seed_mask,
+                                  bool is_hit) {
+  std::vector<int64_t> rows;
+  rows.reserve(seed_mask.size());
+  for (int64_t row = 0; row < static_cast<int64_t>(seed_mask.size()); ++row) {
+    if ((seed_mask[row] != 0) == is_hit) {
+      rows.emplace_back(row);
+    }
+  }
+  return rows;
+}
+
+std::vector<int32_t> collect_hit_ids(const std::vector<int32_t>& embedding_ids,
+                                     const std::vector<uint8_t>& seed_mask) {
+  CHECK_EQ(embedding_ids.size(), seed_mask.size())
+      << "embedding_ids and seed_mask size mismatch";
+  std::vector<int32_t> hit_ids;
+  hit_ids.reserve(embedding_ids.size());
+  for (size_t row = 0; row < embedding_ids.size(); ++row) {
+    if (seed_mask[row] != 0) {
+      hit_ids.emplace_back(embedding_ids[row]);
+    }
+  }
+  return hit_ids;
+}
+
+torch::Tensor build_miss_mask(const std::vector<uint8_t>& seed_mask,
+                              const torch::Device& device) {
+  std::vector<uint8_t> miss_vec;
+  miss_vec.reserve(seed_mask.size());
+  for (uint8_t is_hit : seed_mask) {
+    miss_vec.emplace_back(is_hit == 0 ? 1 : 0);
+  }
+  return torch::tensor(miss_vec, torch::dtype(torch::kBool)).to(device);
+}
+
+void check_miss_mask(const ForwardInput& input,
+                     const torch::Tensor& miss_mask,
+                     const std::vector<ForwardOutput>& draft_outputs) {
+  CHECK(miss_mask.defined()) << "decode miss_mask must be defined";
+  CHECK_EQ(miss_mask.scalar_type(), torch::kBool)
+      << "decode miss_mask must be bool";
+  CHECK_EQ(miss_mask.dim(), 1) << "decode miss_mask must be 1D";
+  const int64_t batch_size = input.input_params.num_sequences;
+  CHECK_EQ(miss_mask.numel(), batch_size)
+      << "decode miss_mask batch size mismatch";
+  CHECK(!draft_outputs.empty()) << "draft_outputs must not be empty";
+  CHECK(draft_outputs.front().sample_output.next_tokens.defined())
+      << "first draft output next_tokens must be defined";
+  CHECK_EQ(draft_outputs.front().sample_output.next_tokens.numel(), batch_size)
+      << "draft output batch size mismatch";
 }
 
 }  // namespace
@@ -146,29 +204,43 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return target_allocated && draft_allocated;
 }
 
-#if defined(USE_NPU)
 bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
   const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
 
+#if defined(USE_NPU) || defined(USE_MLU)
   if (kv_cache_transfer_ == nullptr) {
+#if defined(USE_NPU)
     kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
         options_.device_ip().value(),
         options_.transfer_listen_port(),
         options_.instance_role(),
         context_.get_model_args().model_type());
-
+#elif defined(USE_MLU)
+    CHECK_EQ(FLAGS_kv_cache_transfer_type, "Mooncake")
+        << "MLU MTP push only supports Mooncake KV transfer.";
+    kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
+        device_.index(),
+        options_.transfer_listen_port(),
+        device_,
+        context_.get_model_args().model_type());
+#endif
     int32_t device_id = device_.index();
     kv_cache_transfer_->initialize(device_id);
   }
+#endif
 
   bool target_allocated = true;
   const auto target_status = impl_->get_status();
   if (target_status == WorkerImpl::Status::LOADED) {
+#if defined(USE_NPU) || defined(USE_MLU)
     target_allocated = impl_->allocate_kv_cache_with_transfer(
         kv_cache_transfer_, kv_cache_shape);
+#else
+    target_allocated = impl_->allocate_kv_cache_with_transfer(kv_cache_shape);
+#endif
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
   }
@@ -176,8 +248,13 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
+#if defined(USE_NPU) || defined(USE_MLU)
     draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
         kv_cache_transfer_, kv_cache_shape);
+#else
+    draft_allocated =
+        draft_impl_->allocate_kv_cache_with_transfer(kv_cache_shape);
+#endif
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -192,7 +269,6 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   }
   return target_allocated && draft_allocated;
 }
-#endif
 
 ForwardInput MTPWorkerImpl::update_input_by_last_step_output(
     ForwardInput& inputs) {
@@ -391,12 +467,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode_single(
   CHECK_EQ(options_.num_speculative_tokens(), 1)
       << "step_decode_single requires num_speculative_tokens == 1";
   std::vector<ForwardOutput> draft_outputs;
-  draft_outputs.emplace_back(prepare_last_output_for_decode(input));
+  torch::Tensor miss_mask;
+  draft_outputs.emplace_back(prepare_last_output_for_decode(input, miss_mask));
 
   ForwardInput validate_input;
   prepare_validate_inputs(input, validate_input);
   fill_validate_input_from_draft_outputs(draft_outputs, validate_input);
-  return run_validate(input, draft_outputs, validate_input);
+  return run_validate(input, miss_mask, draft_outputs, validate_input);
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_decode_multi_step(
@@ -405,7 +482,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode_multi_step(
       << "step_decode_multi_step requires num_speculative_tokens > 1";
   ForwardInput draft_input = input;
   std::vector<ForwardOutput> draft_outputs;
-  draft_outputs.emplace_back(prepare_last_output_for_decode(input));
+  torch::Tensor miss_mask;
+  draft_outputs.emplace_back(prepare_last_output_for_decode(input, miss_mask));
 
   ForwardInput validate_input, next_step_input;
   Timer timer;
@@ -442,19 +520,82 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode_multi_step(
               timer.elapsed_seconds());
 
   fill_validate_input_from_draft_outputs(draft_outputs, validate_input);
-  return run_validate(input, draft_outputs, validate_input);
+  return run_validate(input, miss_mask, draft_outputs, validate_input);
 }
 
 ForwardOutput MTPWorkerImpl::prepare_last_output_for_decode(
-    const ForwardInput& input) {
-  ForwardOutput last_output =
-      embedding_cache_->read_for_decode(input.input_params.embedding_ids);
+    const ForwardInput& input,
+    torch::Tensor& miss_mask) {
+  CHECK(embedding_cache_ != nullptr)
+      << "embedding_cache_ must be initialized before decode";
+  CHECK(input.token_ids.defined()) << "decode input token_ids must be defined";
+  const std::vector<int32_t>& embedding_ids = input.input_params.embedding_ids;
+  CHECK(!embedding_ids.empty()) << "decode embedding_ids must not be empty";
+
+  const std::vector<uint8_t> seed_mask =
+      embedding_cache_->build_seed_mask(embedding_ids);
+  miss_mask = build_miss_mask(seed_mask, device_);
+  const bool all_hit = std::all_of(seed_mask.begin(),
+                                   seed_mask.end(),
+                                   [](uint8_t is_hit) { return is_hit != 0; });
+  if (all_hit) {
+    ForwardOutput last_output =
+        embedding_cache_->read_for_decode(embedding_ids);
+    last_output.sample_output.next_tokens =
+        last_output.sample_output.next_tokens.to(
+            torch::dtype(torch::kInt).device(device_));
+    last_output.sample_output.embeddings =
+        last_output.sample_output.embeddings.to(device_);
+    last_output.sample_output.probs =
+        last_output.sample_output.probs.to(device_);
+    return last_output;
+  }
+
+  const int64_t batch_size = static_cast<int64_t>(embedding_ids.size());
+  CHECK_EQ(input.token_ids.numel(), batch_size)
+      << "decode input tokens must match embedding_ids size";
+  const int64_t hidden_size = get_embedding_placeholder_size();
+  CHECK_GT(hidden_size, 0) << "embedding placeholder size must be positive";
+  const std::vector<int32_t> hit_ids =
+      collect_hit_ids(embedding_ids, seed_mask);
+
+  torch::Tensor hit_tokens;
+  torch::Tensor hit_embeddings;
+  torch::Tensor hit_probs;
+  if (!hit_ids.empty()) {
+    ForwardOutput hit_output = embedding_cache_->read_for_decode(hit_ids);
+    hit_tokens = hit_output.sample_output.next_tokens;
+    hit_embeddings = hit_output.sample_output.embeddings;
+    hit_probs = specBuilder::draftProbs::compress_for_cache(
+        hit_output.sample_output.probs, hit_output.sample_output.next_tokens);
+  }
+
+  ForwardOutput last_output;
   last_output.sample_output.next_tokens =
-      last_output.sample_output.next_tokens.to(
-          torch::dtype(torch::kInt).device(device_));
-  last_output.sample_output.embeddings =
-      last_output.sample_output.embeddings.to(device_);
-  last_output.sample_output.probs = last_output.sample_output.probs.to(device_);
+      input.token_ids.to(torch::dtype(torch::kInt).device(device_));
+  last_output.sample_output.embeddings = torch::zeros(
+      {batch_size, hidden_size}, torch::dtype(dtype_).device(device_));
+  torch::TensorOptions prob_options =
+      torch::dtype(torch::kFloat32).device(device_);
+  if (hit_probs.defined()) {
+    prob_options = torch::dtype(hit_probs.scalar_type()).device(device_);
+  }
+  last_output.sample_output.probs = torch::ones({batch_size}, prob_options);
+
+  if (hit_ids.empty()) {
+    return last_output;
+  }
+
+  const std::vector<int64_t> hit_rows = collect_rows(seed_mask, true);
+  torch::Tensor hit_idx =
+      torch::tensor(hit_rows, torch::dtype(torch::kLong).device(device_));
+
+  last_output.sample_output.next_tokens.index_put_(
+      {hit_idx}, hit_tokens.to(torch::dtype(torch::kInt).device(device_)));
+  last_output.sample_output.embeddings.index_put_({hit_idx},
+                                                  hit_embeddings.to(device_));
+  last_output.sample_output.probs.index_put_(
+      {hit_idx}, hit_probs.to(last_output.sample_output.probs.options()));
   return last_output;
 }
 
@@ -473,8 +614,11 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
 
 std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     const ForwardInput& input,
+    const torch::Tensor& miss_mask,
     const std::vector<ForwardOutput>& draft_outputs,
     ForwardInput& validate_input) {
+  check_miss_mask(input, miss_mask, draft_outputs);
+
   // run the target model to get the verification scores
   Timer timer;
   timer.reset();
@@ -487,6 +631,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   timer.reset();
   SampleOutput val_output =
       validate(input.sampling_params, draft_outputs, target_output);
+  patch_force_reject_rows(target_output, miss_mask, val_output);
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -504,6 +649,123 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   val_output.embeddings = torch::Tensor();
   target_output.sample_output = val_output;
   return target_output;
+}
+
+void MTPWorkerImpl::patch_force_reject_rows(const ForwardOutput& target_output,
+                                            const torch::Tensor& miss_mask,
+                                            SampleOutput& sample_output) {
+  CHECK(miss_mask.defined()) << "force reject miss_mask must be defined";
+  CHECK_EQ(miss_mask.scalar_type(), torch::kBool)
+      << "force reject miss_mask must be bool";
+  CHECK_EQ(miss_mask.dim(), 1) << "force reject miss_mask must be 1D";
+  if (!miss_mask.any().item<bool>()) {
+    return;
+  }
+
+  CHECK(sample_output.next_tokens.defined())
+      << "force reject sample_output.next_tokens must be defined";
+  CHECK_EQ(sample_output.next_tokens.dim(), 2)
+      << "force reject next_tokens must be [batch, width]";
+  const int64_t batch_size = miss_mask.numel();
+  const int64_t token_width = sample_output.next_tokens.size(1);
+  CHECK_EQ(sample_output.next_tokens.size(0), batch_size)
+      << "force reject next_tokens batch mismatch";
+  CHECK(target_output.sample_output.next_tokens.defined())
+      << "force reject target next_tokens must be defined";
+  CHECK_EQ(target_output.sample_output.next_tokens.numel(),
+           batch_size * token_width)
+      << "force reject target next_tokens size mismatch";
+  CHECK(sample_output.embeddings.defined())
+      << "force reject sample_output.embeddings must be defined";
+  CHECK_EQ(sample_output.embeddings.dim(), 3)
+      << "force reject embeddings must be [batch, width, hidden]";
+  CHECK_EQ(sample_output.embeddings.size(0), batch_size)
+      << "force reject embeddings batch mismatch";
+  CHECK_EQ(sample_output.embeddings.size(1), token_width)
+      << "force reject embeddings width mismatch";
+  CHECK(target_output.sample_output.embeddings.defined())
+      << "force reject target embeddings must be defined";
+
+  torch::Tensor miss_idx = torch::nonzero(miss_mask).view({-1}).to(
+      sample_output.next_tokens.device());
+  if (miss_idx.numel() == 0) {
+    return;
+  }
+
+  torch::Tensor target_tokens =
+      target_output.sample_output.next_tokens.view({batch_size, token_width});
+  torch::Tensor target_embeddings = target_output.sample_output.embeddings.view(
+      {batch_size, token_width, sample_output.embeddings.size(2)});
+
+  torch::Tensor patched_tokens =
+      torch::full_like(sample_output.next_tokens.index_select(0, miss_idx), -1);
+  patched_tokens.slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+      .copy_(target_tokens.index_select(0, miss_idx)
+                 .slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+                 .to(patched_tokens.options()));
+  sample_output.next_tokens.index_put_({miss_idx}, patched_tokens);
+  sample_output.embeddings.index_put_(
+      {miss_idx},
+      target_embeddings.index_select(0, miss_idx).to(sample_output.embeddings));
+
+  if (sample_output.logprobs.defined()) {
+    CHECK_EQ(sample_output.logprobs.dim(), 2)
+        << "force reject logprobs must be [batch, width]";
+    CHECK(target_output.logits.defined())
+        << "force reject target logits must be defined";
+    torch::Tensor target_logits =
+        target_output.logits.view({batch_size, token_width, -1});
+    torch::Tensor target_logprobs = torch::log_softmax(
+        target_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+    torch::Tensor first_tokens = target_tokens.index_select(0, miss_idx)
+                                     .slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+                                     .to(torch::kLong)
+                                     .unsqueeze(-1);
+    torch::Tensor first_logprobs = target_logprobs.index_select(0, miss_idx)
+                                       .slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+                                       .gather(/*dim=*/2, first_tokens)
+                                       .squeeze(-1)
+                                       .to(sample_output.logprobs.options());
+    torch::Tensor patched_logprobs =
+        torch::zeros_like(sample_output.logprobs.index_select(0, miss_idx));
+    patched_logprobs.slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+        .copy_(first_logprobs);
+    sample_output.logprobs.index_put_({miss_idx}, patched_logprobs);
+  }
+
+  if (sample_output.top_tokens.defined()) {
+    CHECK(target_output.sample_output.top_tokens.defined())
+        << "force reject target top_tokens must be defined";
+    CHECK_EQ(sample_output.top_tokens.dim(), 3)
+        << "force reject top_tokens must be [batch, width, topk]";
+    torch::Tensor target_top_tokens =
+        target_output.sample_output.top_tokens.view(
+            {batch_size, token_width, sample_output.top_tokens.size(2)});
+    torch::Tensor patched_top_tokens = torch::full_like(
+        sample_output.top_tokens.index_select(0, miss_idx), -1);
+    patched_top_tokens.slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+        .copy_(target_top_tokens.index_select(0, miss_idx)
+                   .slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+                   .to(patched_top_tokens.options()));
+    sample_output.top_tokens.index_put_({miss_idx}, patched_top_tokens);
+  }
+
+  if (sample_output.top_logprobs.defined()) {
+    CHECK(target_output.sample_output.top_logprobs.defined())
+        << "force reject target top_logprobs must be defined";
+    CHECK_EQ(sample_output.top_logprobs.dim(), 3)
+        << "force reject top_logprobs must be [batch, width, topk]";
+    torch::Tensor target_top_logprobs =
+        target_output.sample_output.top_logprobs.view(
+            {batch_size, token_width, sample_output.top_logprobs.size(2)});
+    torch::Tensor patched_top_logprobs =
+        torch::zeros_like(sample_output.top_logprobs.index_select(0, miss_idx));
+    patched_top_logprobs.slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+        .copy_(target_top_logprobs.index_select(0, miss_idx)
+                   .slice(/*dim=*/1, /*start=*/0, /*end=*/1)
+                   .to(patched_top_logprobs.options()));
+    sample_output.top_logprobs.index_put_({miss_idx}, patched_top_logprobs);
+  }
 }
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {
