@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <tuple>
 
+#include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 
 namespace xllm {
@@ -136,6 +137,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
         args.rope_scaling_factor(), args.rope_scaling_mscale_all_dim());
     scaling *= mscale * mscale;
   }
+  scaling_ = scaling;
 
   if (enable_lighting_indexer_) {
     indexer_ =
@@ -161,7 +163,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                                     /*num_local_heads=*/1,
                                     kv_lora_rank_,
                                     args.sliding_window(),
-                                    scaling,
+                                    scaling_,
                                     use_fused_mla_qkv_,
                                     enable_lighting_indexer_,
                                     args.enable_mla()));
@@ -343,6 +345,100 @@ void DeepseekV2AttentionImpl::prepare_mla_inputs(
   }
 }
 
+DeepseekV2AttentionImpl::PrefillMha DeepseekV2AttentionImpl::build_prefill_mha(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& positions,
+    const AttentionMetadata& attn_metadata,
+    const HeadInfo& heads) {
+  const int32_t dim = -1;
+  PrefillMha out;
+  QueryPrep query_prep = prep_query(hidden_states, heads);
+  out.q_norm = query_prep.q_norm;
+
+  auto q_vec = query_prep.q.split({qk_nope_head_dim_, qk_rope_head_dim_}, dim);
+  torch::Tensor q_nope = q_vec[0];
+  torch::Tensor q_pe = q_vec[1];
+  rotary_emb_->forward(q_pe,
+                       positions,
+                       attn_metadata.q_cu_seq_lens,
+                       attn_metadata.max_query_len,
+                       /*is_prompt=*/true);
+  torch::Tensor q = torch::empty_like(query_prep.q);
+  q.slice(dim, 0, qk_nope_head_dim_).copy_(q_nope);
+  q.slice(dim, qk_nope_head_dim_).copy_(q_pe);
+
+  torch::Tensor latent_cache = kv_a_proj_with_mqa_(hidden_states);
+  decode_kv_pre_base(latent_cache,
+                     positions,
+                     attn_metadata,
+                     /*use_prompt_rope=*/true);
+  MhaKv kv = build_mha_kv(latent_cache, heads);
+
+  out.q_input = q.reshape({q.size(0), -1});
+  out.k_input = kv.k_input;
+  out.v_input = kv.v_input;
+  out.cache_input = latent_cache.reshape({latent_cache.size(0), -1});
+  return out;
+}
+
+DeepseekV2AttentionImpl::MhaKv DeepseekV2AttentionImpl::build_mha_kv(
+    const torch::Tensor& latent_cache,
+    const HeadInfo& heads) {
+  const int32_t dim = -1;
+  MhaKv out;
+  torch::Tensor kv_a = latent_cache.slice(dim, 0, kv_lora_rank_);
+  torch::Tensor kv = kv_b_proj_->forward(kv_a).view(
+      {-1, heads.proj, qk_nope_head_dim_ + v_head_dim_});
+  auto kv_vec = kv.split({qk_nope_head_dim_, v_head_dim_}, dim);
+  torch::Tensor k_nope = kv_vec[0];
+  torch::Tensor v = kv_vec[1];
+
+  torch::Tensor k = torch::empty(
+      {latent_cache.size(0), heads.proj, qk_head_dim_}, latent_cache.options());
+  k.slice(dim, 0, qk_nope_head_dim_).copy_(k_nope);
+  torch::Tensor k_pe = latent_cache.slice(dim, kv_lora_rank_).unsqueeze(1);
+  k.slice(dim, qk_nope_head_dim_).copy_(k_pe.expand({-1, heads.proj, -1}));
+
+  out.k_input = k.reshape({k.size(0), -1});
+  out.v_input = v.reshape({v.size(0), -1});
+  return out;
+}
+
+torch::Tensor DeepseekV2AttentionImpl::run_prefill_mha(
+    const PrefillMha& inputs,
+    const AttentionMetadata& attn_metadata,
+    const HeadInfo& heads) const {
+  torch::Tensor query = inputs.q_input.view({-1, heads.attn, qk_head_dim_});
+  torch::Tensor key = inputs.k_input.view({-1, heads.attn, qk_head_dim_});
+  torch::Tensor value = inputs.v_input.view({-1, heads.attn, v_head_dim_});
+  torch::Tensor output =
+      torch::empty({query.size(0), heads.attn, v_head_dim_}, query.options());
+  std::optional<torch::Tensor> output_lse = std::nullopt;
+  xllm::kernel::mlu::batch_prefill(query,
+                                   key,
+                                   value,
+                                   output,
+                                   output_lse,
+                                   attn_metadata.q_cu_seq_lens,
+                                   attn_metadata.kv_cu_seq_lens,
+                                   /*alibi_slope=*/std::nullopt,
+                                   /*alibi_bias=*/std::nullopt,
+                                   /*q_quant_scale=*/std::nullopt,
+                                   /*k_quant_scale=*/std::nullopt,
+                                   /*v_quant_scale=*/std::nullopt,
+                                   /*out_quant_scale=*/std::nullopt,
+                                   /*block_tables=*/std::nullopt,
+                                   attn_metadata.max_query_len,
+                                   attn_metadata.max_seq_len,
+                                   scaling_,
+                                   /*is_causal=*/true,
+                                   /*window_size_left=*/-1,
+                                   /*window_size_right=*/-1,
+                                   /*compute_dtype=*/"float",
+                                   /*return_lse=*/false);
+  return output.view({-1, heads.attn * v_head_dim_});
+}
+
 AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
     const torch::Tensor& positions,
     const torch::Tensor& hidden_states,
@@ -446,6 +542,23 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill) {
   const auto& heads = active_heads();
+  if (attn_metadata.is_prefill) {
+    PrefillMha prefill_mha =
+        build_prefill_mha(hidden_states, positions, attn_metadata, heads);
+    auto k_cache_scale = kv_cache.get_k_cache_scale();
+    build_mla_attention_metadata(positions,
+                                 hidden_states,
+                                 prefill_mha.q_norm,
+                                 prefill_mha.cache_input,
+                                 attn_metadata,
+                                 kv_cache,
+                                 k_cache_scale,
+                                 /*is_prefill_phase=*/true);
+    torch::Tensor attn_output =
+        run_prefill_mha(prefill_mha, attn_metadata, heads);
+    return o_proj_->forward(attn_output);
+  }
+
   torch::Tensor q, q_norm;
   torch::Tensor q_input = torch::empty(
       {hidden_states.size(0), heads.attn, kv_lora_rank_ + qk_rope_head_dim_},

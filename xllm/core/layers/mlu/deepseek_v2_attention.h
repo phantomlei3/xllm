@@ -96,6 +96,19 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     torch::Tensor v_input;
   };
 
+  struct PrefillMha {
+    torch::Tensor q_norm;
+    torch::Tensor q_input;
+    torch::Tensor k_input;
+    torch::Tensor v_input;
+    torch::Tensor cache_input;
+  };
+
+  struct MhaKv {
+    torch::Tensor k_input;
+    torch::Tensor v_input;
+  };
+
   torch::Tensor forward_normal_tp(const torch::Tensor& positions,
                                   const torch::Tensor& hidden_states,
                                   const AttentionMetadata& attn_metadata,
@@ -109,6 +122,13 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                            const v32_sp::DeepseekV32SPContext& sp_ctx,
                            KVCache& kv_cache,
                            bool is_prefill_or_chunked_prefill);
+  torch::Tensor forward_sp_prefill_mha(
+      const torch::Tensor& positions,
+      const torch::Tensor& hidden_states,
+      const AttentionMetadata& attn_metadata,
+      const v32_sp::DeepseekV32SPContext& sp_ctx,
+      KVCache& kv_cache,
+      const QueryPrep& query_prep);
   QueryPrep prep_query(const torch::Tensor& hidden_states,
                        const HeadInfo& heads);
   void fill_q_input(torch::Tensor& q_input,
@@ -120,6 +140,10 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                                 const torch::Tensor& positions,
                                 const QueryPrep& query_prep,
                                 const v32_sp::DeepseekV32SPContext& sp_ctx);
+  PrefillMha build_sp_prefill_mha(const torch::Tensor& hidden_states,
+                                  const torch::Tensor& positions,
+                                  const QueryPrep& query_prep,
+                                  const v32_sp::DeepseekV32SPContext& sp_ctx);
   v32_sp::PaddedGatherHandle sp_mla_comm(
       const torch::Tensor& k_input,
       const v32_sp::DeepseekV32SPContext& sp_ctx) const;
@@ -152,6 +176,15 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                           bool enable_fused_qkv,
                           bool use_prompt_rope);
 
+  PrefillMha build_prefill_mha(const torch::Tensor& hidden_states,
+                               const torch::Tensor& positions,
+                               const AttentionMetadata& attn_metadata,
+                               const HeadInfo& heads);
+  MhaKv build_mha_kv(const torch::Tensor& latent_cache, const HeadInfo& heads);
+  torch::Tensor run_prefill_mha(const PrefillMha& inputs,
+                                const AttentionMetadata& attn_metadata,
+                                const HeadInfo& heads) const;
+
   AttentionMetadata build_mla_attention_metadata(
       const torch::Tensor& positions,
       const torch::Tensor& hidden_states,
@@ -181,6 +214,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   bool has_trans_ = false;
   bool interleaved_ = false;
   double eps_;
+  float scaling_ = 1.0f;
   int64_t qk_head_dim_;
   int64_t v_head_dim_;
   int64_t q_lora_rank_;
