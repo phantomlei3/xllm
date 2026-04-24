@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
 #include "core/util/device_name_utils.h"
+#include "core/util/model_type_utils.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "function_call/function_call_parser.h"
@@ -105,6 +106,7 @@ void validate_flags(const std::string& model_type) {
     LOG(FATAL) << "enable_prefill_sp is not supported for model_type="
                << model_type;
   }
+  FLAGS_enable_prefill_mqa = xllm::util::should_enable_prefill_mqa(model_type);
 #if defined(USE_MLU)
   // Disable enable_schedule_overlap for VLM models on MLU backend
   if (FLAGS_enable_schedule_overlap && FLAGS_backend == "vlm") {

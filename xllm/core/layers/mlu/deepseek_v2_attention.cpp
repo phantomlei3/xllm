@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <tuple>
 
+#include "core/util/model_type_utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 
@@ -39,6 +40,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       eps_(args.rms_norm_eps()),
       interleaved_(true) {
   use_full_replicated_attention_weights_ = FLAGS_enable_prefill_sp;
+  use_prefill_mqa_ = optimization_config.enable_prefill_mqa.value_or(
+      util::should_enable_prefill_mqa(args.model_type()));
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
@@ -542,7 +545,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill) {
   const auto& heads = active_heads();
-  if (attn_metadata.is_prefill) {
+  if (attn_metadata.is_prefill && !use_prefill_mqa_) {
     PrefillMha prefill_mha =
         build_prefill_mha(hidden_states, positions, attn_metadata, heads);
     auto k_cache_scale = kv_cache.get_k_cache_scale();

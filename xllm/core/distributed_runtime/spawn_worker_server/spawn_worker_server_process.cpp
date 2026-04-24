@@ -31,15 +31,16 @@ limitations under the License.
 // @enable_shm
 // @is_local
 // @enable_prefill_sp
+// @enable_prefill_mqa
 // @task_type
 // @worker_type
 // @input_shm_size
 // @output_shm_size
 // @communication_backend
 int main(int argc, char* argv[]) {
-  if (argc < 16) {
+  if (argc < 17) {
     LOG(ERROR)
-        << "Spawn worker process receive wrong args. Need 16 args, receive "
+        << "Spawn worker process receive wrong args. Need 17 args, receive "
         << argc;
     return 1;
   }
@@ -54,11 +55,12 @@ int main(int argc, char* argv[]) {
   int enable_shm = atoi(argv[8]);
   int is_local = atoi(argv[9]);
   int enable_prefill_sp = atoi(argv[10]);
-  std::string task_type = std::string(argv[11]);
-  std::string worker_type = std::string(argv[12]);
-  uint64_t input_shm_size = atoll(argv[13]);
-  uint64_t output_shm_size = atoll(argv[14]);
-  std::string communication_backend = std::string(argv[15]);
+  int enable_prefill_mqa = atoi(argv[11]);
+  std::string task_type = std::string(argv[12]);
+  std::string worker_type = std::string(argv[13]);
+  uint64_t input_shm_size = atoll(argv[14]);
+  uint64_t output_shm_size = atoll(argv[15]);
+  std::string communication_backend = std::string(argv[16]);
 
   LOG(INFO) << "Spawn worker: "
             << "master_node_addr = " << master_node_addr
@@ -72,6 +74,7 @@ int main(int argc, char* argv[]) {
             << ", output_shm_size = " << output_shm_size
             << ", is_local = " << (is_local > 0)
             << ", enable_prefill_sp = " << (enable_prefill_sp > 0)
+            << ", enable_prefill_mqa = " << (enable_prefill_mqa > 0)
             << ", task_type = " << task_type
             << ", worker_type = " << worker_type
             << ", communication_backend = " << communication_backend << "\n";
@@ -88,6 +91,7 @@ int main(int argc, char* argv[]) {
                                  output_shm_size,
                                  is_local > 0,
                                  enable_prefill_sp > 0,
+                                 enable_prefill_mqa > 0,
                                  task_type,
                                  worker_type,
                                  communication_backend);

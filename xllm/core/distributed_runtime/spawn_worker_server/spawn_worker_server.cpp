@@ -61,6 +61,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      uint64_t output_shm_size,
                                      bool is_local,
                                      bool enable_prefill_sp,
+                                     bool enable_prefill_mqa,
                                      const std::string& task_type,
                                      const std::string& worker_type,
                                      const std::string& communication_backend) {
@@ -83,6 +84,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .task_type(task_type);
   FLAGS_enable_schedule_overlap = false;
   FLAGS_enable_prefill_sp = enable_prefill_sp;
+  FLAGS_enable_prefill_mqa = enable_prefill_mqa;
   FLAGS_master_node_addr = master_node_addr;
   FLAGS_block_size = block_size;
   FLAGS_communication_backend = communication_backend;

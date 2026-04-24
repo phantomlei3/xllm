@@ -224,6 +224,8 @@ void WorkerServer::create_spawn_server(int local_rank,
   const char* is_local_ptr = is_local_str.c_str();
   auto enable_prefill_sp_str = std::to_string(options.enable_prefill_sp());
   const char* enable_prefill_sp_ptr = enable_prefill_sp_str.c_str();
+  auto enable_prefill_mqa_str = std::to_string(FLAGS_enable_prefill_mqa);
+  const char* enable_prefill_mqa_ptr = enable_prefill_mqa_str.c_str();
   const char* communication_backend_ptr = FLAGS_communication_backend.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
@@ -240,6 +242,7 @@ void WorkerServer::create_spawn_server(int local_rank,
                         enable_shm_ptr,
                         is_local_ptr,
                         enable_prefill_sp_ptr,
+                        enable_prefill_mqa_ptr,
                         options.task_type().c_str(),
                         worker_type_ptr,
                         input_shm_size_ptr,

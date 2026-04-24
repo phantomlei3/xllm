@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/global_flags.h"
+#include "core/util/model_type_utils.h"
 #include "platform/device.h"
 #include "util/env_var.h"
 #if defined(USE_NPU)
@@ -87,6 +88,8 @@ void ModelContext::derive_optimization_config() {
   optimization_config_.enable_fused_spec_kernel = false;
   optimization_config_.enable_fused_mla_kernel = false;
   optimization_config_.enable_fused_indexer_qk = false;
+  optimization_config_.enable_prefill_mqa =
+      util::should_enable_prefill_mqa(model_args_.model_type());
 
   // determine whether to enable fused kernel based on backend
   std::string backend = Device::type_str();

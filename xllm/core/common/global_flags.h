@@ -114,6 +114,8 @@ DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_bool(enable_prefill_sp);
 
+DECLARE_bool(enable_prefill_mqa);
+
 DECLARE_string(master_node_addr);
 
 DECLARE_string(xtensor_master_node_addr);

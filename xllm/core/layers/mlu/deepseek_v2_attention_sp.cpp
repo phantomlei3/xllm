@@ -35,7 +35,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
-  if (attn_metadata.is_prefill) {
+  if (attn_metadata.is_prefill && !use_prefill_mqa_) {
     return forward_sp_prefill_mha(
         positions, hidden_states, attn_metadata, sp_ctx, kv_cache, query_prep);
   }

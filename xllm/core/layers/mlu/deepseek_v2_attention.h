@@ -209,6 +209,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
 
  private:
   bool use_full_replicated_attention_weights_ = false;
+  bool use_prefill_mqa_ = false;
   bool use_fused_mla_qkv_ = false;
   bool enable_lighting_indexer_ = false;
   bool has_trans_ = false;
