@@ -189,6 +189,43 @@ TEST(MooncakeKVCacheTransferDefaultTest, SmallSrcTpUsesBaseMerge) {
   expect_same_merge(merged_kv_infos, base_kv_infos);
 }
 
+TEST(MooncakeKVCacheTransferDefaultTest, SubsetBlocksKeepMergeAndSpecBufIds) {
+  MooncakeKVCacheTransferDefault transfer(
+      0, 0, torch::Device(torch::kCPU), "deepseek_v3");
+  transfer.has_v_cache_ = false;
+  transfer.num_layers_ = 40;
+  transfer.buf_cnt_per_layer_ = 2;
+  transfer.main_registered_ = true;
+  transfer.spec_num_layers_ = 1;
+  transfer.spec_has_v_cache_ = false;
+  transfer.spec_buf_cnt_per_layer_ = 1;
+  transfer.spec_buf_offset_ = 80;
+  transfer.spec_registered_ = true;
+
+  TransferKVInfo info = make_info(/*dst_dp_size=*/1,
+                                  /*dst_tp_size=*/3,
+                                  /*dst_dp_rank=*/0);
+  info.local_blocks_ids = {12, 13};
+  info.remote_blocks_ids = {102, 103};
+  const ParallelArgs parallel_args = make_args(/*rank=*/2,
+                                               /*world_size=*/8,
+                                               /*dp_size=*/1);
+  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
+
+  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+
+  ASSERT_EQ(merged_kv_infos.size(), 1U);
+  const KVCacheTransfer::KVCacheInfo& kv_info = merged_kv_infos.begin()->second;
+  EXPECT_EQ(kv_info.dst_cluster_id, 102U);
+  EXPECT_EQ(kv_info.dst_addr, "addr_2");
+  EXPECT_EQ(kv_info.dst_k_cache_id, 202);
+  EXPECT_EQ(kv_info.dst_v_cache_id, 302);
+  EXPECT_EQ(kv_info.src_blocks, (std::vector<uint64_t>{12, 13}));
+  EXPECT_EQ(kv_info.dst_blocks, (std::vector<uint64_t>{102, 103}));
+  EXPECT_EQ(transfer.get_buf_ids({0}, false), (std::vector<int64_t>{0}));
+  EXPECT_EQ(transfer.get_buf_ids({0}, true), (std::vector<int64_t>{80}));
+}
+
 TEST(MooncakeKVCacheTransferDefaultTest, SpecDraftBufIdsUseSpecOffset) {
   MooncakeKVCacheTransferDefault transfer(
       0, 0, torch::Device(torch::kCPU), "test");

@@ -53,6 +53,22 @@ static const std::unordered_set<std::string> prefill_sp_supported_model_set = {
 namespace {
 
 void fix_mlu_disagg_pd_flags() {
+  if (FLAGS_enable_chunked_prefill) {
+    CHECK_EQ(FLAGS_backend, "llm")
+        << "MLU PD chunked prefill only supports backend=llm";
+    CHECK(!FLAGS_enable_pd_ooc)
+        << "MLU PD chunked prefill does not support pd_ooc";
+    CHECK(!FLAGS_enable_prefix_cache)
+        << "MLU PD chunked prefill does not support prefix cache";
+    CHECK(!FLAGS_enable_schedule_overlap)
+        << "MLU PD chunked prefill does not support schedule overlap";
+    CHECK(!FLAGS_enable_graph)
+        << "MLU PD chunked prefill does not support graph";
+    CHECK_EQ(FLAGS_kv_cache_transfer_type, "Mooncake")
+        << "MLU PD chunked prefill requires Mooncake transfer";
+    CHECK_EQ(FLAGS_kv_cache_transfer_mode, "PUSH")
+        << "MLU PD chunked prefill requires PUSH transfer";
+  }
   if (FLAGS_kv_cache_transfer_type != "Mooncake") {
     LOG(WARNING) << "MLU disaggregated PD requires "
                  << "kv_cache_transfer_type=Mooncake; forcing from "
@@ -74,11 +90,6 @@ void fix_mlu_disagg_pd_flags() {
     LOG(WARNING) << "MLU disaggregated PD does not support prefix cache; "
                  << "forcing enable_prefix_cache=false.";
     FLAGS_enable_prefix_cache = false;
-  }
-  if (FLAGS_enable_chunked_prefill) {
-    LOG(WARNING) << "MLU disaggregated PD does not support chunked prefill; "
-                 << "forcing enable_chunked_prefill=false.";
-    FLAGS_enable_chunked_prefill = false;
   }
   if (FLAGS_enable_pd_ooc) {
     LOG(WARNING) << "MLU disaggregated PD does not support pd_ooc; "

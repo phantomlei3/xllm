@@ -24,6 +24,7 @@ cc_library(
     chunked_prefill_scheduler.h
     zero_eviction_scheduler.h
     continuous_scheduler.h
+    disagg_chunked_pd_scheduler.h
     disagg_pd_scheduler.h
     pd_ooc_scheduler.h
     async_response_processor.h
@@ -39,6 +40,7 @@ cc_library(
     chunked_prefill_scheduler.cpp
     zero_eviction_scheduler.cpp
     continuous_scheduler.cpp
+    disagg_chunked_pd_scheduler.cpp
     disagg_pd_scheduler.cpp
     pd_ooc_scheduler.cpp
     async_response_processor.cpp
@@ -66,6 +68,7 @@ cc_test(
     fixed_steps_scheduler_test
   SRCS
     chunked_prefill_scheduler_test.cpp
+    disagg_chunked_pd_scheduler_test.cpp
     continuous_scheduler_test.cpp
     fixed_steps_scheduler_test.cpp
   DEPS

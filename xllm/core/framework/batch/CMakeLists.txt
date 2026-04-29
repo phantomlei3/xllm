@@ -10,6 +10,7 @@ cc_library(
     batch.h
     batch_factory.h
     batch_input_builder.h
+    transfer_kv_info_builder.h
     rec_batch_input_builder.h
     onerec_batch_input_builder.h
     rec_multi_round_batch_input_builder.h
@@ -19,6 +20,7 @@ cc_library(
     batch.cpp
     batch_factory.cpp
     batch_input_builder.cpp
+    transfer_kv_info_builder.cpp
     rec_batch_input_builder.cpp
     onerec_batch_input_builder.cpp
     rec_multi_round_batch_input_builder.cpp
@@ -36,6 +38,7 @@ cc_test(
     batch_test
   SRCS
     batch_test.cpp
+    transfer_kv_info_builder_test.cpp
   DEPS
     :batch
     absl::time

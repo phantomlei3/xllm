@@ -234,6 +234,10 @@ class TestMTPWorkerImpl final : public MTPWorkerImpl {
     return prepare_last_output_for_decode(input, miss_mask);
   }
 
+  void prepare_prefill(const ForwardInput& input, ForwardInput& output) {
+    prepare_prefill_inputs(input, output);
+  }
+
   std::optional<ForwardOutput> run_decode_single(const ForwardInput& input) {
     return step_decode_single(input);
   }
@@ -428,6 +432,38 @@ TEST(MTPWorkerImplTest, AllocateKvCacheWithTransferUsesInnerWorkers) {
 #endif
 }
 #endif
+
+TEST(MTPWorkerImplTest, PreparePrefillKeepsTransferWindow) {
+  torch::Device device(Device::type_torch(), 0);
+  TestMTPWorkerImpl worker(device);
+
+  ForwardInput input;
+  input.token_ids = torch::tensor({1, 2, 3, 4}, torch::kInt);
+  input.positions = torch::tensor({0, 1, 2, 3}, torch::kInt);
+  input.input_params.num_sequences = 1;
+#if defined(USE_NPU)
+  input.input_params.q_seq_lens_vec = {4};
+#else
+  input.input_params.q_seq_lens_vec = {0, 4};
+#endif
+  input.input_params.extra_token_ids = {5};
+  TransferKVInfo info;
+  info.request_id = "req-1";
+  info.local_blocks_ids = {10, 11};
+  info.remote_blocks_ids = {100, 101};
+  input.transfer_kv_infos = {info};
+
+  ForwardInput draft_input;
+  worker.prepare_prefill(input, draft_input);
+
+  ASSERT_EQ(draft_input.transfer_kv_infos.size(), 1u);
+  EXPECT_EQ(draft_input.transfer_kv_infos[0].local_blocks_ids,
+            (std::vector<uint64_t>{10, 11}));
+  EXPECT_EQ(draft_input.transfer_kv_infos[0].remote_blocks_ids,
+            (std::vector<uint64_t>{100, 101}));
+  EXPECT_EQ(tensor_to_vec_int32(draft_input.token_ids),
+            (std::vector<int32_t>{2, 3, 4, 5}));
+}
 
 TEST(MTPWorkerImplTest, ValidateForceRejectRowsOnBootstrapMiss) {
   torch::Device device(Device::type_torch(), 0);
