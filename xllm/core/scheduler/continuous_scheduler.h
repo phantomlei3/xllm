@@ -164,6 +164,7 @@ class ContinuousScheduler : public Scheduler {
   std::vector<size_t> get_running_sequences_budgets() {
     return running_sequences_budgets_;
   }
+  bool has_queue_test() { return if_queue_not_empty(); }
   std::vector<std::shared_ptr<Request>> get_waiting_requests() {
     std::vector<std::shared_ptr<Request>> result;
 
@@ -285,6 +286,12 @@ class ContinuousScheduler : public Scheduler {
       bool budget_exhausted,
       bool block_exhausted);
   void handle_running_requests(std::shared_ptr<Request> request);
+  void fail_disagg_pd_decode_request(
+      std::unique_ptr<DecodePriorityQueue>& running_queue,
+      const std::shared_ptr<Request>& request,
+      const std::string& message);
+
+  bool is_disagg_pd_decode() const;
 
   bool check_if_enough_to_evict(DecodePriorityQueue* running_queue_to_evict,
                                 Sequence* prefill_sequence,

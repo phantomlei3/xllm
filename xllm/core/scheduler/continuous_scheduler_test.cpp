@@ -1,5 +1,6 @@
 #include "continuous_scheduler.h"
 
+#include <absl/synchronization/notification.h>
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
 
@@ -23,16 +24,25 @@ class FakeTokenizer : public Tokenizer {
               std::vector<int32_t>* ids,
               bool add_special_tokens = true) const {
     NOT_IMPLEMENTED();
+    return false;
   }
   std::string decode(const Slice<int32_t>& ids,
                      bool skip_special_tokens) const {
     NOT_IMPLEMENTED();
+    return "";
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
+    return std::nullopt;
   }
-  std::string id_to_token(int32_t id) const { NOT_IMPLEMENTED(); }
-  size_t vocab_size() const { NOT_IMPLEMENTED(); }
+  std::string id_to_token(int32_t id) const {
+    NOT_IMPLEMENTED();
+    return "";
+  }
+  size_t vocab_size() const {
+    NOT_IMPLEMENTED();
+    return 0;
+  }
   std::unique_ptr<Tokenizer> clone() const {
     return std::make_unique<FakeTokenizer>();
   }
@@ -50,16 +60,32 @@ class FakeEngine : public Engine {
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }
-  ForwardOutput step(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
+  ForwardOutput step(std::vector<Batch>& batch) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
   void update_last_step_result(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const { NOT_IMPLEMENTED(); }
-  const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const {
+    static const ModelArgs args = [] {
+      ModelArgs model_args;
+      model_args.mm_num_position_embeddings() = 0;
+      return model_args;
+    }();
+    NOT_IMPLEMENTED();
+    return args;
+  }
+  const TokenizerArgs& tokenizer_args() const {
+    static const TokenizerArgs args;
+    NOT_IMPLEMENTED();
+    return args;
+  }
   std::vector<int64_t> get_active_activation_memory() const {
     NOT_IMPLEMENTED();
+    return {};
   }
   bool init() override { return true; }
 
@@ -79,6 +105,19 @@ class ScopedBoolFlagValue {
  private:
   bool& flag_;
   bool old_;
+};
+
+class ScopedInt32FlagValue {
+ public:
+  ScopedInt32FlagValue(int32_t& flag, int32_t value) : flag_(flag), old_(flag) {
+    flag_ = value;
+  }
+
+  ~ScopedInt32FlagValue() { flag_ = old_; }
+
+ private:
+  int32_t& flag_;
+  int32_t old_;
 };
 
 ContinuousScheduler::Options create_scheduler_options(
@@ -241,6 +280,22 @@ void make_request_decode_ready(const std::shared_ptr<Request>& request) {
 void set_chunk_kv(const std::shared_ptr<Request>& request, size_t kv_tokens) {
   for (auto& seq : request->sequences()) {
     seq->kv_state().set_kv_cache_tokens_num(kv_tokens);
+  }
+}
+
+bool are_batches_empty(const std::vector<Batch>& batches) {
+  for (const Batch& batch : batches) {
+    if (!batch.empty()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void expect_resource_exhausted(const RequestOutput& output) {
+  EXPECT_TRUE(output.status.has_value());
+  if (output.status.has_value()) {
+    EXPECT_EQ(output.status->code(), StatusCode::RESOURCE_EXHAUSTED);
   }
 }
 
@@ -409,6 +464,160 @@ TEST(ContinuousSchedulerTest, OnDecodePreemptOffDecode) {
   EXPECT_TRUE(scheduler->get_running_requests().size() == 1);
   EXPECT_TRUE(scheduler->get_running_requests()[0]->offline() == false);
   EXPECT_TRUE(scheduler->get_waiting_requests_num() == 1);
+}
+
+TEST(ContinuousSchedulerTest, PDDecodeDoesNotPreemptDecodeRequest) {
+  const int32_t block_num = 9;
+  const int32_t block_size = 32;
+  const int32_t max_tokens_per_chunk_for_prefill = 1024;
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
+  opt.enable_disagg_pd() = true;
+  opt.instance_role() = InstanceRole::DECODE;
+
+  auto engine = std::make_unique<FakeEngine>(block_num, block_size);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({127, 127},
+                       {10, 10},
+                       std::vector<bool>{false, false},
+                       std::vector<int32_t>{2, 2},
+                       std::nullopt,
+                       std::nullopt,
+                       30000);
+  absl::Notification req0_failed;
+  absl::Notification req1_failed;
+  requests[0]->state().output_func =
+      [&req0_failed](const RequestOutput& output) {
+        expect_resource_exhausted(output);
+        req0_failed.Notify();
+        return true;
+      };
+  requests[1]->state().output_func =
+      [&req1_failed](const RequestOutput& output) {
+        expect_resource_exhausted(output);
+        req1_failed.Notify();
+        return true;
+      };
+  for (std::shared_ptr<Request> req : requests) {
+    scheduler->add_request(req);
+  }
+
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  EXPECT_EQ(batch[0].size(), 2u);
+  update_requests(requests);
+
+  batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  EXPECT_EQ(batch[0].size(), 2u);
+  update_requests(requests);
+
+  const int32_t free_blocks_before =
+      util::max(block_manager_pool->num_free_blocks());
+  batch = scheduler->prepare_batch_test();
+
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
+  EXPECT_FALSE(scheduler->has_queue_test());
+  EXPECT_FALSE(requests[0]->preempted());
+  EXPECT_FALSE(requests[1]->preempted());
+  EXPECT_TRUE(req0_failed.WaitForNotificationWithTimeout(absl::Seconds(1)));
+  EXPECT_FALSE(req1_failed.HasBeenNotified());
+  EXPECT_GT(util::max(block_manager_pool->num_free_blocks()),
+            free_blocks_before);
+  ASSERT_EQ(batch.size(), 1u);
+  EXPECT_EQ(batch[0].size(), 1u);
+  EXPECT_EQ(scheduler->get_running_requests().size(), 1u);
+  EXPECT_EQ(scheduler->get_running_requests()[0].get(), requests[1].get());
+}
+
+TEST(ContinuousSchedulerTest, PDDecodePreemptedWaitingDoesNotPrefill) {
+  const int32_t max_tokens_per_chunk_for_prefill = 1024;
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
+  opt.enable_disagg_pd() = true;
+  opt.instance_role() = InstanceRole::DECODE;
+
+  auto engine = std::make_unique<FakeEngine>(9, 32);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({64},
+                       {10},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       30000);
+  std::shared_ptr<Request> request = requests[0];
+  request->set_preempted();
+  absl::Notification fail_notified;
+  request->state().output_func = [&fail_notified](const RequestOutput& output) {
+    expect_resource_exhausted(output);
+    fail_notified.Notify();
+    return true;
+  };
+
+  scheduler->add_request(request);
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+
+  EXPECT_TRUE(are_batches_empty(batch));
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
+  EXPECT_FALSE(scheduler->has_queue_test());
+  EXPECT_TRUE(scheduler->get_running_requests().empty());
+  EXPECT_EQ(request->sequences()[0]->kv_cache_tokens_num(), 0u);
+  EXPECT_TRUE(fail_notified.WaitForNotificationWithTimeout(absl::Seconds(1)));
+}
+
+TEST(ContinuousSchedulerTest, PDDecodeBeamAllocFailDoesNotPreempt) {
+  ScopedInt32FlagValue max_seqs_guard(FLAGS_max_seqs_per_batch, 0);
+  const int32_t block_num = 20;
+  const int32_t block_size = 32;
+  const int32_t max_tokens_per_chunk_for_prefill = 1024;
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
+  opt.enable_disagg_pd() = true;
+  opt.instance_role() = InstanceRole::DECODE;
+
+  auto engine = std::make_unique<FakeEngine>(block_num, block_size);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+
+  std::shared_ptr<Request> request = generate_request({64},
+                                                      {10},
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      std::vector<int32_t>{1},
+                                                      std::vector<int32_t>{3},
+                                                      30000)[0];
+  request->sequences().emplace_back(
+      std::make_unique<Sequence>(*request->sequences()[0]));
+  request->sequences().emplace_back(
+      std::make_unique<Sequence>(*request->sequences()[0]));
+  ASSERT_EQ(request->sequences().size(), 3u);
+  make_request_decode_ready(request);
+
+  absl::Notification fail_notified;
+  request->state().output_func = [&fail_notified](const RequestOutput& output) {
+    expect_resource_exhausted(output);
+    fail_notified.Notify();
+    return true;
+  };
+
+  const int32_t free_blocks_before =
+      util::max(block_manager_pool->num_free_blocks());
+  scheduler->add_request(request);
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+
+  EXPECT_TRUE(are_batches_empty(batch));
+  EXPECT_TRUE(fail_notified.WaitForNotificationWithTimeout(absl::Seconds(1)));
+  EXPECT_FALSE(request->preempted());
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
+  EXPECT_FALSE(scheduler->has_queue_test());
+  EXPECT_TRUE(scheduler->get_running_requests().empty());
+  EXPECT_EQ(util::max(block_manager_pool->num_free_blocks()),
+            free_blocks_before);
 }
 
 // TEST-2:

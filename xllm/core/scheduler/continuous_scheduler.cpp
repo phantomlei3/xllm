@@ -154,6 +154,25 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
 
 ContinuousScheduler::~ContinuousScheduler() { running_requests_.clear(); }
 
+bool ContinuousScheduler::is_disagg_pd_decode() const {
+  return options_.enable_disagg_pd() && options_.instance_role().has_value() &&
+         options_.instance_role().value() == InstanceRole::DECODE;
+}
+
+void ContinuousScheduler::fail_disagg_pd_decode_request(
+    std::unique_ptr<DecodePriorityQueue>& running_queue,
+    const std::shared_ptr<Request>& request,
+    const std::string& message) {
+  CHECK(is_disagg_pd_decode());
+  CHECK(!running_queue->empty());
+  CHECK(running_queue->top().get() == request.get());
+
+  running_queue->pop_top();
+  kv_cache_manager_->deallocate(request.get());
+  response_processor_->process_failed_request(
+      request, {StatusCode::RESOURCE_EXHAUSTED, message});
+}
+
 bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
@@ -258,6 +277,16 @@ void ContinuousScheduler::handle_prefill_requests(
     }
 
     std::shared_ptr<Request> request(waiting_priority_queue.top());
+    if (is_disagg_pd_decode() && request->preempted()) {
+      waiting_priority_queue.pop();
+      kv_cache_manager_->deallocate(request.get());
+      response_processor_->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "Preempted request can not be recomputed on decode instance"});
+      continue;
+    }
+
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
@@ -544,6 +573,13 @@ void ContinuousScheduler::handle_decode_requests(
           LOG(ERROR) << "Beam strict scheduling allocation failed. "
                      << "request_id=" << request->request_id()
                      << ", beam=" << request->check_beam_search();
+          if (is_disagg_pd_decode()) {
+            fail_disagg_pd_decode_request(
+                running_queue,
+                request,
+                "PD decode request failed to allocate beam decode blocks");
+            continue;
+          }
           // Fallback to full request deallocation to avoid inconsistent
           // per-sequence states.
           kv_cache_manager_->deallocate(request.get());
@@ -653,6 +689,14 @@ void ContinuousScheduler::handle_decode_requests(
     }
 
     // memory exhausted, try to preempt lowest priority request
+    if (is_disagg_pd_decode()) {
+      fail_disagg_pd_decode_request(
+          running_queue,
+          request,
+          "PD decode request exhausted KV cache blocks and can not preempt");
+      continue;
+    }
+
     // continue to evict blocks until enough or no other requests that can be
     // preempted
     if (options_.enable_online_preempt_offline() && !request->offline() &&
