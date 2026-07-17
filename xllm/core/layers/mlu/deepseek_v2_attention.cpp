@@ -439,14 +439,13 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (sp_ctx != nullptr && can_use_sp()) {
-    // DSA cross-layer top-k sharing under sequence parallel is out of scope
-    // for the eager path; the sequence parallel branch always recomputes.
     return forward_sp(positions,
                       hidden_states,
                       attn_metadata,
                       *sp_ctx,
                       kv_cache,
-                      is_prefill_or_chunked_prefill);
+                      is_prefill_or_chunked_prefill,
+                      topk_transfer);
   }
   return forward_normal_tp(positions,
                            hidden_states,

@@ -116,12 +116,14 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
 #endif
       auto& layer = layers_ref()[i];
       prepare_decoder_layer_for_forward(i, layer, attn_metadata);
-      hidden_states = layer(hidden_states,
-                            residual,
-                            positions_local,
-                            attn_metadata,
-                            kv_caches[i],
-                            modified_input_params);
+      hidden_states = forward_decoder_layer(i,
+                                            layer,
+                                            hidden_states,
+                                            residual,
+                                            positions_local,
+                                            attn_metadata,
+                                            kv_caches[i],
+                                            modified_input_params);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
                                               hidden_states.device())) {
         active_cp_context_ = nullptr;

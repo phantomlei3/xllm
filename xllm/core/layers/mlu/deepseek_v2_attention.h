@@ -112,7 +112,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                            const AttentionMetadata& attn_metadata,
                            const v32_cp::DeepseekV32CPContext& sp_ctx,
                            KVCache& kv_cache,
-                           bool is_prefill_or_chunked_prefill);
+                           bool is_prefill_or_chunked_prefill,
+                           DsaTopkTransfer* topk_transfer);
   QueryPrep prep_query(const torch::Tensor& hidden_states,
                        const HeadInfo& heads);
   void fill_q_input(torch::Tensor& q_input,

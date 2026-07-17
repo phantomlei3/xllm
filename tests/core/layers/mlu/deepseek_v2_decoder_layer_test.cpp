@@ -1813,48 +1813,7 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
       DeepseekV2DecoderLayerTestPeer::attention_has_child(*decoder, "indexer"));
 }
 
-// Prefill CP combined with GLM5.2 cross-layer top-k sharing is not
-// supported yet; the model entry must fatal on this combination. The guard is a
-// pure decision so it can be verified without constructing the full model.
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOffAndSharePlan_ThenNoConflict) {
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 4;
-  model_args_.index_skip_topk_offset() = 3;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/false,
-                                                topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndGlm52FreqPlan_ThenConflict) {
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 4;
-  model_args_.index_skip_topk_offset() = 3;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                               topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndPatternPlan_ThenConflict) {
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = build_fs_pattern_glm52(kNumLayers);
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                               topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenPatternHasOnlyFullLayers_ThenNoConflict) {
+TEST_F(DeepseekV2DecoderTopkShareTest, PatternWithOnlyFullLayersHasNoReuse) {
   configure_glm5_indexer();
   model_args_.n_layers() = 4;
   model_args_.index_topk_freq() = 1;
@@ -1863,14 +1822,12 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
 
   const DsaTopkSharePlan topk_share_plan(model_args_);
   EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).reuse_topk);
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).output_topk);
 }
 
 TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenShortFreqPlanHasNoSharedLayer_ThenNoConflict) {
+       ShortFrequencyPlanWithNoSharedLayerHasNoReuse) {
   configure_glm5_indexer();
   model_args_.n_layers() = 3;
   model_args_.index_topk_freq() = 4;
@@ -1879,39 +1836,7 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
 
   const DsaTopkSharePlan topk_share_plan(model_args_);
   EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/2).output_topk);
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndGlm51IndexerDoesNotShare_ThenNoConflict) {
-  configure_glm5_indexer();
-  // GLM5.1: every layer owns an indexer, so CP has no cross-layer carrier.
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_EQ(topk_share_plan.num_indexer_layers(), kNumLayers);
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndDeepseekV32NoSharePlan_ThenNoConflict) {
-  // DeepSeek-V3.2: has an indexer but every layer self-computes (freq=1, no
-  // pattern), so the existing CP path is unaffected.
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
 }
 
 }  // namespace layer

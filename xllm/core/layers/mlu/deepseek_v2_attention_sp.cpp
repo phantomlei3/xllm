@@ -27,61 +27,78 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     const AttentionMetadata& attn_metadata,
     const v32_cp::DeepseekV32CPContext& sp_ctx,
     KVCache& kv_cache,
-    bool is_prefill_or_chunked_prefill) {
+    bool is_prefill_or_chunked_prefill,
+    DsaTopkTransfer* topk_transfer) {
   CHECK(can_use_sp())
       << "deepseek_v32 sequence parallel requires replicated attention "
          "weights and lighting indexer.";
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
-  auto index_cache_scale = kv_cache.get_indexer_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
 
   std::optional<torch::Tensor> new_block_tables = std::nullopt;
   std::optional<torch::Tensor> new_context_lens = std::nullopt;
   v32_cp::PaddedGatherHandle mla_handle;
-  torch::Tensor index_cache = kv_cache.get_index_cache();
   IndexerSPPreOut index_pre;
   v32_cp::PaddedGatherHandle index_handle;
+  const DsaTopkState* reused_topk =
+      topk_transfer != nullptr ? topk_transfer->input() : nullptr;
 
   Device device(hidden_states.device());
   if (sp_comm_stream_ == nullptr) {
     sp_comm_stream_ = device.get_stream_from_pool();
   }
-  index_pre = indexer_->sp_pre(hidden_states,
-                               query_prep.q_norm,
-                               positions,
-                               sp_ctx.local_attn_metadata,
-                               sp_ctx,
-                               /*quantize_output=*/false);
-  auto compute_stream = device.current_stream();
-  sp_comm_stream_->wait_stream(*compute_stream);
-  {
-    torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
-    index_handle = indexer_->sp_comm(index_pre.k_local, sp_ctx);
+  if (reused_topk == nullptr) {
+    index_pre = indexer_->sp_pre(hidden_states,
+                                 query_prep.q_norm,
+                                 positions,
+                                 sp_ctx.local_attn_metadata,
+                                 sp_ctx,
+                                 /*quantize_output=*/false);
+    auto compute_stream = device.current_stream();
+    sp_comm_stream_->wait_stream(*compute_stream);
+    {
+      torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
+      index_handle = indexer_->sp_comm(index_pre.k_local, sp_ctx);
+    }
+  } else {
+    new_block_tables = reused_topk->block_tables();
+    new_context_lens = reused_topk->context_lens();
   }
 
   auto mla_inputs =
       build_sp_mla_inputs(hidden_states, positions, query_prep, sp_ctx);
 
-  torch::Tensor k_gathered =
-      indexer_->sp_wait_k(index_pre.k_local, index_handle, sp_ctx);
-  compute_stream = device.current_stream();
+  torch::Tensor k_gathered;
+  if (reused_topk == nullptr) {
+    k_gathered = indexer_->sp_wait_k(index_pre.k_local, index_handle, sp_ctx);
+  }
+  auto compute_stream = device.current_stream();
   sp_comm_stream_->wait_stream(*compute_stream);
   {
     torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
     mla_handle = sp_mla_comm(mla_inputs.k_input, sp_ctx);
   }
-  auto index_out = indexer_->sp_post(index_pre,
-                                     k_gathered,
-                                     index_cache,
-                                     attn_metadata,
-                                     sp_ctx.gathered_slot_mapping,
-                                     sp_ctx,
-                                     index_cache_scale);
-  new_block_tables = std::get<0>(index_out);
-  new_context_lens = std::get<1>(index_out);
+  if (reused_topk == nullptr) {
+    torch::Tensor index_cache = kv_cache.get_index_cache();
+    auto index_cache_scale = kv_cache.get_indexer_cache_scale();
+    auto index_out = indexer_->sp_post(index_pre,
+                                       k_gathered,
+                                       index_cache,
+                                       attn_metadata,
+                                       sp_ctx.gathered_slot_mapping,
+                                       sp_ctx,
+                                       index_cache_scale);
+    new_block_tables = std::get<0>(index_out);
+    new_context_lens = std::get<1>(index_out);
+  }
   finish_sp_k_gather(mla_inputs, mla_handle, sp_ctx);
+
+  if (topk_transfer != nullptr && topk_transfer->captures_output()) {
+    topk_transfer->publish_output(
+        DsaTopkState(new_block_tables.value(), new_context_lens.value()));
+  }
 
   AttentionMetadata attn_indexer_metadata =
       build_mla_attention_metadata(positions,
