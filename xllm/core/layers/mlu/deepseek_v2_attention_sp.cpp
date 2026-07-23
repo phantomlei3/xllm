@@ -29,9 +29,9 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill,
     DsaTopkTransfer* topk_transfer) {
-  CHECK(can_use_sp())
+  CHECK(can_use_sp(topk_transfer))
       << "deepseek_v32 sequence parallel requires replicated attention "
-         "weights and lighting indexer.";
+         "weights plus either a lighting indexer or reused top-k state.";
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();

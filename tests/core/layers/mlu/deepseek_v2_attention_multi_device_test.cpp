@@ -778,15 +778,20 @@ AttentionRunResult run_attention_prefill_once(
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
     bool build_cp_context = true,
-    DsaTopkTransfer* topk_transfer = nullptr) {
+    DsaTopkTransfer* topk_transfer = nullptr,
+    bool enable_indexer = true) {
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
   OptimizationConfig optimization_config;
   optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
   optimization_config.enable_fused_indexer_qk = false;
-  DeepseekV2Attention attention(
-      args, quant_args, effective_parallel_args, options, optimization_config);
+  DeepseekV2Attention attention(args,
+                                quant_args,
+                                effective_parallel_args,
+                                options,
+                                optimization_config,
+                                enable_indexer);
   attention->load_state_dict(state_dict);
   const int32_t token_num = static_cast<int32_t>(tokens.numel());
   AttentionMetadata metadata =
@@ -1191,7 +1196,8 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
                                    /*build_cp_context=*/true,
-                                   &shared_transfer);
+                                   &shared_transfer,
+                                   /*enable_indexer=*/false);
     xllm_device.synchronize_default_stream();
 
     const DsaTopkState* reused_topk = shared_transfer.output();

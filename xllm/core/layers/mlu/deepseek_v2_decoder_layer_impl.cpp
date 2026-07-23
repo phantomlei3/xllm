@@ -392,8 +392,8 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward_impl(
   if (use_mtp_topk_bridge) {
     *mtp_topk_output = mtp_transfer->mtp_output_state();
   }
-  const bool use_sp_output =
-      context_parallel_context_ != nullptr && attention_->can_use_sp();
+  const bool use_sp_output = context_parallel_context_ != nullptr &&
+                             attention_->can_use_sp(effective_transfer);
   const auto attn_layout = attention_->post_attn_layout(use_sp_output);
   auto prep = prepare_moe_inputs(
       std::move(x), residual.value(), input_params, attn_layout);

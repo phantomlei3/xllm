@@ -65,8 +65,10 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     return use_full_replicated_attention_weights_;
   }
 
-  bool can_use_sp() const {
-    return has_indexer_ && use_replicated_attn_weights();
+  bool can_use_sp(const DsaTopkTransfer* topk_transfer = nullptr) const {
+    const bool reuses_topk =
+        topk_transfer != nullptr && topk_transfer->input() != nullptr;
+    return use_replicated_attn_weights() && (has_indexer_ || reuses_topk);
   }
 
   PostAttnLayout post_attn_layout(bool use_sp_output) const {
