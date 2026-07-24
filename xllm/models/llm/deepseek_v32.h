@@ -110,25 +110,14 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     torch::Tensor positions_local =
         layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     std::optional<torch::Tensor> residual;
-    for (size_t i = 0; i < layers_ref().size(); ++i) {
-#if defined(USE_CUDA) || defined(USE_MUSA)
-      attn_metadata.plan_info->layer_id = i;
-#endif
-      auto& layer = layers_ref()[i];
-      prepare_decoder_layer_for_forward(i, layer, attn_metadata);
-      hidden_states = forward_decoder_layer(i,
-                                            layer,
-                                            hidden_states,
-                                            residual,
-                                            positions_local,
-                                            attn_metadata,
-                                            kv_caches[i],
-                                            modified_input_params);
-      if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
-                                              hidden_states.device())) {
-        active_cp_context_ = nullptr;
-        return ModelOutput();
-      }
+    if (!run_decoder_layers(hidden_states,
+                            residual,
+                            positions_local,
+                            attn_metadata,
+                            kv_caches,
+                            modified_input_params)) {
+      active_cp_context_ = nullptr;
+      return ModelOutput();
     }
     hidden_states =
         layer::v32_cp::gather_and_restore_global(hidden_states, cp_ctx.value());

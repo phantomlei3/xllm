@@ -677,6 +677,8 @@ struct AttentionRunResult {
   torch::Tensor global_output;
   torch::Tensor k_cache;
   torch::Tensor index_cache;
+  DeepseekV2AttentionImpl::PostAttnLayout layout =
+      DeepseekV2AttentionImpl::PostAttnLayout::kTpShard;
   bool used_sp = false;
   int64_t local_token_num = 0;
 };
@@ -686,6 +688,8 @@ void check_repl_output_contract(const AttentionRunResult& result,
                                 int64_t hidden_size,
                                 const std::string& label) {
   CHECK(!result.used_sp) << label << " unexpectedly used sequence parallel";
+  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kReplicated)
+      << label << " must report replicated attention output";
   CHECK_EQ(result.local_token_num, token_num)
       << label << " local token count mismatch";
   CHECK_EQ(result.local_output.sizes(), result.global_output.sizes())
@@ -707,6 +711,8 @@ void check_sp_output_contract(const AttentionRunResult& result,
                               int64_t local_token_num,
                               const std::string& label) {
   CHECK(result.used_sp) << label << " did not use sequence parallel";
+  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal)
+      << label << " must report packed-local attention output";
   CHECK_EQ(result.local_token_num, local_token_num)
       << label << " local token count mismatch";
   CHECK_EQ(result.local_output.size(0), local_token_num)
@@ -760,7 +766,8 @@ torch::Tensor run_attention_decode_once(const ModelArgs& args,
       args, quant_args, effective_parallel_args, options, optimization_config);
   attention->load_state_dict(state_dict);
   AttentionMetadata metadata = create_decode_metadata(options);
-  return attention->forward(positions, hidden_states, metadata, kv_cache);
+  return attention->forward(positions, hidden_states, metadata, kv_cache)
+      .output;
 }
 
 AttentionRunResult run_attention_prefill_once(
@@ -821,12 +828,14 @@ AttentionRunResult run_attention_prefill_once(
     }
   }
   AttentionRunResult result;
-  result.local_output = attention->forward(local_positions,
-                                           local_hidden_states,
-                                           metadata,
-                                           kv_cache,
-                                           sp_ctx ? &sp_ctx.value() : nullptr,
-                                           topk_transfer);
+  auto attention_result = attention->forward(local_positions,
+                                             local_hidden_states,
+                                             metadata,
+                                             kv_cache,
+                                             sp_ctx ? &sp_ctx.value() : nullptr,
+                                             topk_transfer);
+  result.local_output = std::move(attention_result.output);
+  result.layout = attention_result.layout;
   result.global_output = result.local_output;
   result.used_sp = sp_ctx.has_value();
   result.local_token_num =
@@ -1524,12 +1533,14 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
         // the attention output.
         AttentionMetadata full_metadata = create_decode_metadata(options);
         DsaTopkTransfer full_transfer = DsaTopkTransfer::capture_output();
-        torch::Tensor full_out = full_attention->forward(positions,
-                                                         hidden_states,
-                                                         full_metadata,
-                                                         full_kv_cache,
-                                                         /*sp_ctx=*/nullptr,
-                                                         &full_transfer);
+        torch::Tensor full_out = full_attention
+                                     ->forward(positions,
+                                               hidden_states,
+                                               full_metadata,
+                                               full_kv_cache,
+                                               /*sp_ctx=*/nullptr,
+                                               &full_transfer)
+                                     .output;
         xllm_device.synchronize_default_stream();
 
         const DsaTopkState* full_topk = full_transfer.output();
@@ -1563,12 +1574,14 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
         CHECK_EQ(shared_input->context_lens().data_ptr(),
                  full_context_lens.data_ptr())
             << "Shared relay must reuse the Full layer's context lens";
-        torch::Tensor shared_out = shared_attention->forward(positions,
-                                                             hidden_states,
-                                                             shared_metadata,
-                                                             shared_kv_cache,
-                                                             /*sp_ctx=*/nullptr,
-                                                             &shared_transfer);
+        torch::Tensor shared_out = shared_attention
+                                       ->forward(positions,
+                                                 hidden_states,
+                                                 shared_metadata,
+                                                 shared_kv_cache,
+                                                 /*sp_ctx=*/nullptr,
+                                                 &shared_transfer)
+                                       .output;
         xllm_device.synchronize_default_stream();
 
         CHECK(shared_transfer.output() == nullptr)
@@ -1721,12 +1734,14 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
         AttentionMetadata full_metadata =
             create_batch_decode_metadata(options, kBucketTokens);
         DsaTopkTransfer full_transfer = DsaTopkTransfer::capture_output();
-        torch::Tensor full_out = full_attention->forward(positions,
-                                                         hidden_states,
-                                                         full_metadata,
-                                                         full_kv_cache,
-                                                         /*sp_ctx=*/nullptr,
-                                                         &full_transfer);
+        torch::Tensor full_out = full_attention
+                                     ->forward(positions,
+                                               hidden_states,
+                                               full_metadata,
+                                               full_kv_cache,
+                                               /*sp_ctx=*/nullptr,
+                                               &full_transfer)
+                                     .output;
         xllm_device.synchronize_default_stream();
 
         const DsaTopkState* full_topk = full_transfer.output();
@@ -1752,12 +1767,14 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
         CHECK_EQ(shared_input->block_tables().data_ptr(),
                  full_block_tables.data_ptr())
             << "Shared relay must reuse the Full layer's sparse block table";
-        torch::Tensor shared_out = shared_attention->forward(positions,
-                                                             hidden_states,
-                                                             shared_metadata,
-                                                             shared_kv_cache,
-                                                             /*sp_ctx=*/nullptr,
-                                                             &shared_transfer);
+        torch::Tensor shared_out = shared_attention
+                                       ->forward(positions,
+                                                 hidden_states,
+                                                 shared_metadata,
+                                                 shared_kv_cache,
+                                                 /*sp_ctx=*/nullptr,
+                                                 &shared_transfer)
+                                       .output;
         xllm_device.synchronize_default_stream();
 
         CHECK(shared_transfer.output() == nullptr)
