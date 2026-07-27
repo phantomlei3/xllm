@@ -24,6 +24,10 @@ limitations under the License.
 
 #include "core/framework/model/model_input_params.h"
 #include "core/layers/common/linear.h"
+#if defined(USE_MLU)
+#include "core/layers/common/rotary_embedding_util.h"
+#endif
+#include "models/llm/qwen3_next_hybrid_base.h"
 #include "models/model_registry.h"
 #include "qwen3_5.h"
 
@@ -78,6 +82,19 @@ class Qwen3_5MtpModelImpl : public Qwen3HybridModelImplBase {
     const int32_t n_layers =
         std::max<int32_t>(static_cast<int32_t>(model_args_.n_layers()), 1);
 
+#if defined(USE_MLU)
+    mrope_section_ = model_args_.rope_scaling_mrope_section();
+    if (!mrope_section_.empty()) {
+      const int64_t rotary_dim = static_cast<int64_t>(
+          model_args_.head_dim() * model_args_.partial_rotary_factor());
+      cos_sin_ = layer::rotary::get_concat_rotary_embedding(
+          rotary_dim,
+          model_args_.max_position_embeddings(),
+          model_args_.rope_theta(),
+          options);
+    }
+#endif
+
     pre_fc_norm_embedding_ = register_module(
         "pre_fc_norm_embedding",
         layer::Qwen3NextRMSNorm(
@@ -115,6 +132,12 @@ class Qwen3_5MtpModelImpl : public Qwen3HybridModelImplBase {
         input_params,
         model_args_.enable_mla(),
         build_attention_mask(input_params));
+#if defined(USE_MLU)
+    if (!mrope_section_.empty()) {
+      std::tie(attn_metadata.mrope_cos, attn_metadata.mrope_sin) =
+          layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
+    }
+#endif
 
     torch::Tensor embedding = embed_tokens_(tokens);
     torch::Tensor hidden = input_params.embedding.input_embedding;
@@ -220,6 +243,10 @@ class Qwen3_5MtpModelImpl : public Qwen3HybridModelImplBase {
   bool pre_fc_norm_hidden_loaded_ = false;
   bool fc_loaded_ = false;
   bool norm_loaded_ = false;
+#if defined(USE_MLU)
+  torch::Tensor cos_sin_;
+  std::vector<int64_t> mrope_section_;
+#endif
 };
 
 class Qwen3_5MtpForCausalLMImpl : public Qwen3HybridForCausalLMImplBase {

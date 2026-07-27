@@ -370,6 +370,21 @@ TEST_F(Qwen3_5AttentionTest, DecodeWithGate) {
       << "Decode output must be finite";
 }
 
+TEST_F(Qwen3_5AttentionTest, TextPositionsProduceValidMropeCaches) {
+  (void)MakeLayer(/*attn_output_gate=*/true);
+  auto text_positions = torch::arange(0, 4, options_.dtype(torch::kInt32));
+
+  auto [cos, sin] =
+      rotary::apply_mrope(cos_sin_, text_positions, mrope_section_);
+  auto expanded_positions = text_positions.unsqueeze(0).repeat({3, 1});
+  auto [expected_cos, expected_sin] = ApplyMrope(expanded_positions);
+
+  EXPECT_EQ(cos.dim(), 2);
+  EXPECT_EQ(sin.dim(), 2);
+  EXPECT_TRUE(torch::allclose(cos, expected_cos));
+  EXPECT_TRUE(torch::allclose(sin, expected_sin));
+}
+
 }  // namespace
 }  // namespace layer
 }  // namespace xllm
