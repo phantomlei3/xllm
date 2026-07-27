@@ -28,6 +28,7 @@ limitations under the License.
 #include <mutex>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 namespace xllm {
 namespace net {
@@ -37,11 +38,24 @@ namespace {
 std::mutex g_port_mutex;
 std::unordered_set<int> g_allocated_port_map;
 
+bool is_loopback(const sockaddr_in& addr) {
+  return (ntohl(addr.sin_addr.s_addr) & 0xff000000U) == 0x7f000000U;
+}
+
+std::string to_ip_addr(const sockaddr_in& addr) {
+  char ip[INET_ADDRSTRLEN]{'\0'};
+  const char* result =
+      inet_ntop(addr.sin_family, &addr.sin_addr, ip, sizeof(ip));
+  if (result == nullptr) {
+    return "";
+  }
+  return std::string(ip);
+}
+
 }  // namespace
 
 // TODO: return private ip
 std::string get_local_ip_addr() {
-  char ip[INET_ADDRSTRLEN]{'\0'};
   char hostname[256];
   int ret = gethostname(hostname, sizeof(hostname));
   if (ret != 0) {
@@ -60,15 +74,94 @@ std::string get_local_ip_addr() {
   }
   std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(info,
                                                                   freeaddrinfo);
-  const sockaddr_in* addr = reinterpret_cast<const sockaddr_in*>(info->ai_addr);
-  const char* result =
-      inet_ntop(addr->sin_family, &addr->sin_addr, ip, sizeof(ip));
-  if (result == nullptr) {
-    LOG(ERROR) << "inet_ntop failed";
-    return "";
+  std::string loopback_addr;
+  for (const struct addrinfo* current = info; current != nullptr;
+       current = current->ai_next) {
+    const sockaddr_in* addr =
+        reinterpret_cast<const sockaddr_in*>(current->ai_addr);
+    std::string ip = to_ip_addr(*addr);
+    if (ip.empty()) {
+      continue;
+    }
+    if (!is_loopback(*addr)) {
+      return ip;
+    }
+    if (loopback_addr.empty()) {
+      loopback_addr = std::move(ip);
+    }
   }
 
-  return std::string(ip);
+  return loopback_addr;
+}
+
+std::string get_local_ip_addr_for_remote(const std::string& remote_addr) {
+  std::string remote_host;
+  int remote_port = 0;
+  parse_host_port_from_addr(remote_addr, remote_host, remote_port);
+
+  struct addrinfo* info = nullptr;
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  std::string port = std::to_string(remote_port);
+  int ret = getaddrinfo(remote_host.c_str(), port.c_str(), &hints, &info);
+  if (ret != 0) {
+    LOG(ERROR) << "Failed to resolve remote address " << remote_addr << ": "
+               << gai_strerror(ret);
+    return "";
+  }
+  std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(info,
+                                                                  freeaddrinfo);
+
+  bool has_non_loopback_remote = false;
+  for (const struct addrinfo* current = info; current != nullptr;
+       current = current->ai_next) {
+    const sockaddr_in* remote =
+        reinterpret_cast<const sockaddr_in*>(current->ai_addr);
+    has_non_loopback_remote = has_non_loopback_remote || !is_loopback(*remote);
+
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      continue;
+    }
+    ret = connect(fd, current->ai_addr, current->ai_addrlen);
+    if (ret != 0) {
+      ::close(fd);
+      continue;
+    }
+
+    sockaddr_in local{};
+    socklen_t local_len = sizeof(local);
+    ret =
+        getsockname(fd, reinterpret_cast<struct sockaddr*>(&local), &local_len);
+    ::close(fd);
+    if (ret != 0) {
+      continue;
+    }
+
+    std::string local_ip = to_ip_addr(local);
+    if (!local_ip.empty() && (!is_loopback(local) || is_loopback(*remote))) {
+      return local_ip;
+    }
+  }
+
+  std::string local_ip = get_local_ip_addr();
+  if (has_non_loopback_remote && !local_ip.empty()) {
+    in_addr addr;
+    if (inet_pton(AF_INET, local_ip.c_str(), &addr) == 1) {
+      sockaddr_in local;
+      memset(&local, 0, sizeof(local));
+      local.sin_family = AF_INET;
+      local.sin_addr = addr;
+      if (is_loopback(local)) {
+        LOG(ERROR) << "No routable local address found for remote address "
+                   << remote_addr;
+        return "";
+      }
+    }
+  }
+  return local_ip;
 }
 
 int get_local_free_port() {
