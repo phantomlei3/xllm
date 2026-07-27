@@ -24,13 +24,10 @@ limitations under the License.
 
 #include "core/layers/qwen3_5_decoder_layer.h"
 #include "models/model_registry.h"
-#if defined(USE_NPU)
 #include "qwen3_next.h"
-#endif
 
 namespace xllm {
 
-#if defined(USE_NPU)
 class Qwen3_5ModelImpl : public Qwen3NextModelImpl {
  public:
   explicit Qwen3_5ModelImpl(const ModelContext& context)
@@ -67,7 +64,6 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
   }
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);
-#endif  // USE_NPU
 
 #define LOAD_ARG_TEXT_OR_ROOT(arg_name, json_key, default_value) \
   LOAD_ARG_OR(arg_name, "text_config." json_key, default_value); \
@@ -194,7 +190,6 @@ TORCH_MODULE(Qwen3_5ForCausalLM);
   LOAD_ARG_OR(dtype, "text_config.torch_dtype", args->dtype()); \
   LOAD_ARG_OR(dtype, "torch_dtype", args->dtype())
 
-#if defined(USE_NPU)
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
   LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_text");
@@ -203,9 +198,7 @@ REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
                                 /*num_experts_per_tok=*/0,
                                 /*shared_expert_intermediate_size=*/0);
 });
-#endif  // USE_NPU
 
-#if defined(USE_NPU)
 REGISTER_CAUSAL_MODEL(qwen3_5_moe_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
   LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_moe_text");
@@ -214,7 +207,6 @@ REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
                                 /*num_experts_per_tok=*/10,
                                 /*shared_expert_intermediate_size=*/512);
 });
-#endif  // USE_NPU
 
 #undef LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE
 #undef LOAD_QWEN3_5_NEXT_COMPAT_ARGS

@@ -26,10 +26,12 @@ limitations under the License.
 #include "core/layers/common/linear.h"
 #if defined(USE_MLU)
 #include "core/layers/common/rotary_embedding_util.h"
+#include "core/layers/qwen3_5_decoder_layer.h"
+#else
+#include "models/llm/qwen3_5.h"
 #endif
 #include "models/llm/qwen3_next_hybrid_base.h"
 #include "models/model_registry.h"
-#include "qwen3_5.h"
 
 namespace xllm {
 
