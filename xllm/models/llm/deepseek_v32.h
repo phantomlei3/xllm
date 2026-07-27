@@ -79,7 +79,8 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     auto& attn_metadata = *modified_input_params.attn_metadata;
     std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
     const bool use_model_sharding =
-        cp_size_ > 1 && Platform::uses_model_cp_sharding();
+        cp_size_ > 1 && Platform::uses_model_cp_sharding() &&
+        input_params.meta.batch_forward_type.no_decode();
     if (use_model_sharding) {
       if (cp_group_ == nullptr) {
         CHECK_EQ(parallel_world_size_, 1)
