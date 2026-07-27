@@ -134,6 +134,12 @@ void Qwen3_5DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   }
 }
 
+void Qwen3_5DecoderLayerImpl::verify_loaded_weights() const {
+  if (moe_mlp_) {
+    moe_mlp_->verify_loaded_weights();
+  }
+}
+
 torch::Tensor Qwen3_5DecoderLayerImpl::run_moe(
     torch::Tensor x,
     const ModelInputParams& input_params) {

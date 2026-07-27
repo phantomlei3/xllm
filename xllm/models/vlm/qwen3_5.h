@@ -15,6 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <utility>
+
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/lm_head.h"
 #include "models/model_registry.h"
@@ -86,6 +90,14 @@ class Qwen3_5ModelImpl final
     }
     rms_norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
+
+#if defined(USE_MLU)
+  void verify_loaded_weights() const {
+    for (const auto& layer : layers_) {
+      layer->verify_loaded_weights();
+    }
+  }
+#endif
 
   std::pair<torch::Tensor, torch::Tensor> apply_mrope(
       const torch::Tensor positions) override {
@@ -256,6 +268,15 @@ class Qwen3_5ForCausalLMImpl : public LlmForCausalLMImplBase<Qwen3_5Model> {
  public:
   Qwen3_5ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<Qwen3_5Model>(context) {}
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  std::string prefix = "model.") override {
+    LlmForCausalLMImplBase<Qwen3_5Model>::load_model(std::move(loader),
+                                                     std::move(prefix));
+#if defined(USE_MLU)
+    model_->verify_loaded_weights();
+#endif
+  }
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
