@@ -40,7 +40,6 @@ class Qwen3_5DecoderLayerImpl final : public torch::nn::Module {
   Qwen3_5DecoderLayerImpl(const ModelContext& context, int32_t layer_id);
 
   void load_state_dict(const StateDict& state_dict);
-  void verify_loaded_weights() const;
 
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,

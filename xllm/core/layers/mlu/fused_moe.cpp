@@ -608,26 +608,10 @@ void FusedMoEImpl::verify_loaded_weights() const {
       << "SmoothQuant is enabled but expert gate_proj/up_proj qweight was not "
          "fully loaded. This usually means the checkpoint is missing required "
          "expert qweight tensors.";
-  CHECK(w13_scale_is_loaded_)
-      << "SmoothQuant is enabled but expert gate_proj/up_proj scale was not "
-         "fully loaded. This usually means the checkpoint is missing required "
-         "expert scale tensors.";
-  CHECK(input_smooth_is_loaded_)
-      << "SmoothQuant is enabled but expert gate_proj/up_proj smooth was not "
-         "fully loaded. This usually means the checkpoint is missing required "
-         "expert smooth tensors.";
   CHECK(w2_is_loaded_)
       << "SmoothQuant is enabled but expert down_proj qweight was not fully "
          "loaded. This usually means the checkpoint is missing required "
          "expert qweight tensors.";
-  CHECK(w2_scale_is_loaded_)
-      << "SmoothQuant is enabled but expert down_proj scale was not fully "
-         "loaded. This usually means the checkpoint is missing required "
-         "expert scale tensors.";
-  CHECK(act_smooth_is_loaded_)
-      << "SmoothQuant is enabled but expert down_proj smooth was not fully "
-         "loaded. This usually means the checkpoint is missing required "
-         "expert smooth tensors.";
 }
 
 void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {

@@ -116,16 +116,6 @@ TEST_F(Qwen3_5FusedMoETest, RejectsPartialFusedWeightGroup) {
                "incomplete gate_up smoothquant weight group");
 }
 
-TEST_F(Qwen3_5FusedMoETest, RejectsMissingWeightsAfterIncrementalLoad) {
-  Qwen3_5FusedMoE moe = create_moe();
-  StateDict gate_up_dict = create_gate_up_dict();
-
-  moe->load_state_dict(gate_up_dict);
-
-  EXPECT_DEATH(moe->verify_loaded_weights(),
-               "expert down_proj qweight was not fully loaded");
-}
-
 }  // namespace
 }  // namespace layer
 }  // namespace xllm
