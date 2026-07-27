@@ -113,7 +113,7 @@ TEST_F(Qwen3_5FusedMoETest, RejectsPartialFusedWeightGroup) {
   StateDict state_dict(std::move(weights));
 
   EXPECT_DEATH(moe->load_state_dict(state_dict),
-               "incomplete gate_up smoothquant weight group");
+               "failed to load gate_up smoothquant weights");
 }
 
 }  // namespace

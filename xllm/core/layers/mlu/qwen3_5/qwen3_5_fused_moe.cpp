@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <cstdint>
-
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/state_dict/utils.h"
 #include "layers/common/moe_weight_loader_helper.h"
@@ -26,25 +24,10 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 namespace {
-enum class SqWeightState : int8_t {
-  ABSENT,
-  COMPLETE,
-  PARTIAL,
-};
-
-SqWeightState get_sq_weight_state(const StateDict& state_dict,
-                                  const std::string& prefix) {
-  const bool has_qweight = state_dict.get_tensor(prefix + ".qweight").defined();
-  const bool has_scale =
-      state_dict.get_tensor(prefix + ".per_channel_scale").defined();
-  const bool has_smooth = state_dict.get_tensor(prefix + ".smooth").defined();
-  if (!has_qweight && !has_scale && !has_smooth) {
-    return SqWeightState::ABSENT;
-  }
-  if (has_qweight && has_scale && has_smooth) {
-    return SqWeightState::COMPLETE;
-  }
-  return SqWeightState::PARTIAL;
+bool has_sq_weights(const StateDict& state_dict, const std::string& prefix) {
+  return state_dict.has(prefix + ".qweight") ||
+         state_dict.has(prefix + ".per_channel_scale") ||
+         state_dict.has(prefix + ".smooth");
 }
 
 torch::Tensor get_tensor_with_weight_suffix(const StateDict& state_dict,
@@ -125,12 +108,7 @@ void Qwen3_5FusedMoEImpl::load_experts(const StateDict& state_dict) {
   if (is_smoothquant_) {
     const bool gate_up_loaded =
         w13_is_loaded_ && w13_scale_is_loaded_ && input_smooth_is_loaded_;
-    const SqWeightState gate_up_state =
-        get_sq_weight_state(state_dict, "gate_up_proj");
-    CHECK(gate_up_state != SqWeightState::PARTIAL)
-        << "incomplete gate_up smoothquant weight group for "
-        << state_dict.prefix();
-    if (!gate_up_loaded && gate_up_state == SqWeightState::COMPLETE) {
+    if (!gate_up_loaded && has_sq_weights(state_dict, "gate_up_proj")) {
       CHECK(moe_weight::try_load_gate_up_sq(state_dict,
                                             tp_pg_->rank(),
                                             tp_pg_->world_size(),
@@ -148,12 +126,7 @@ void Qwen3_5FusedMoEImpl::load_experts(const StateDict& state_dict) {
 
     const bool down_loaded =
         w2_is_loaded_ && w2_scale_is_loaded_ && act_smooth_is_loaded_;
-    const SqWeightState down_state =
-        get_sq_weight_state(state_dict, "down_proj");
-    CHECK(down_state != SqWeightState::PARTIAL)
-        << "incomplete down smoothquant weight group for "
-        << state_dict.prefix();
-    if (!down_loaded && down_state == SqWeightState::COMPLETE) {
+    if (!down_loaded && has_sq_weights(state_dict, "down_proj")) {
       CHECK(moe_weight::try_load_down_sq(state_dict,
                                          tp_pg_->rank(),
                                          tp_pg_->world_size(),
