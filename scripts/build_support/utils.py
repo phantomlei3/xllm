@@ -278,13 +278,29 @@ def _is_dependency_installed(candidate_files: list[str]) -> bool:
     return any(os.path.isfile(file_path) for file_path in normalized_candidates)
 
 
+def _get_yalantinglibs_prefix() -> str:
+    return os.path.abspath(
+        os.path.expanduser(
+            os.getenv("YALANTINGLIBS_PREFIX", "/usr/local/yalantinglibs")
+        )
+    )
+
+
 def _get_required_dependency_files() -> dict[str, list[str]]:
-    install_prefix = "/usr/local/yalantinglibs"
-    zstd_library_candidates = ["/usr/lib64/libzstd.so"]
+    install_prefix = _get_yalantinglibs_prefix()
+    library_dirs = [
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/local/lib",
+        "/usr/local/lib64",
+    ]
     multiarch = sysconfig.get_config_var("MULTIARCH")
     if multiarch:
-        zstd_library_candidates.append(
-            os.path.join("/usr/lib", multiarch, "libzstd.so")
+        library_dirs.extend(
+            [
+                os.path.join("/usr/lib", multiarch),
+                os.path.join("/usr/local/lib", multiarch),
+            ]
         )
 
     return {
@@ -297,13 +313,24 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
                 "config.cmake",
             ),
         ],
-        # Mooncake v0.3.12 mooncake-store links -lzstd (needs the -devel
-        # symlink, not just libzstd.so.1) and includes xxhash.h.
-        "zstd-devel": zstd_library_candidates,
-        "xxhash-devel": ["/usr/include/xxhash.h"],
-        # msgpack-cxx headers used by Mooncake v0.3.12's serialize/serializer.h.
-        # Header-only, dropped into /usr/local/include by dependencies.sh.
-        "msgpack-cxx": ["/usr/local/include/msgpack.hpp"],
+        "zstd-header": [
+            "/usr/include/zstd.h",
+            "/usr/local/include/zstd.h",
+        ],
+        "zstd-library": [
+            os.path.join(path, "libzstd.so") for path in library_dirs
+        ],
+        "xxhash-header": [
+            "/usr/include/xxhash.h",
+            "/usr/local/include/xxhash.h",
+        ],
+        "xxhash-library": [
+            os.path.join(path, "libxxhash.so") for path in library_dirs
+        ],
+        "msgpack-cxx": [
+            "/usr/include/msgpack.hpp",
+            "/usr/local/include/msgpack.hpp",
+        ],
     }
 
 
@@ -392,7 +419,7 @@ def _ensure_prebuild_dependencies_installed(script_path: str) -> None:
             _print_manual_check_commands(manual_commands)
             exit(1)
 
-    _export_cmake_prefix_paths(["/usr/local/yalantinglibs"])
+    _export_cmake_prefix_paths([_get_yalantinglibs_prefix()])
 
 
 def _get_cmake_cache_path() -> str:

@@ -9,7 +9,7 @@ NC="\033[0m" # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-INSTALL_PREFIX="/usr/local/yalantinglibs"
+INSTALL_PREFIX="${YALANTINGLIBS_PREFIX:-/usr/local/yalantinglibs}"
 
 print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
@@ -121,22 +121,72 @@ install_yalantinglibs() {
     print_success "yalantinglibs installed successfully to ${INSTALL_PREFIX}"
 }
 
-# Install system development headers required by Mooncake v0.3.12
-# (mooncake-store links -lzstd, includes xxhash.h). The runtime libs
-# already ship with the base image; only the -devel symlinks/headers
-# are missing.
-install_mooncake_system_devel() {
-    print_section "Installing system devel packages required by Mooncake"
-    run_or_die "Failed to install system devel packages" \
-        yum install -y zstd-devel xxhash-devel
-    print_success "System devel packages installed: zstd-devel xxhash-devel"
+header_exists() {
+    local header_name="$1"
+    [ -f "/usr/include/${header_name}" ] || \
+        [ -f "/usr/local/include/${header_name}" ]
 }
 
-# Install the header-only msgpack-cxx headers that Mooncake v0.3.12's
-# serializer.h expects. No matching yum package exists on the base
-# image, so drop the headers into /usr/local/include/. Header-only,
-# no build step needed.
+library_exists() {
+    local library_name="$1"
+    find \
+        /usr/lib \
+        /usr/lib64 \
+        /usr/local/lib \
+        /usr/local/lib64 \
+        -name "${library_name}" \
+        -print \
+        -quit 2>/dev/null | grep -q .
+}
+
+system_dependencies_ready() {
+    header_exists "zstd.h" && \
+        library_exists "libzstd.so" && \
+        header_exists "xxhash.h" && \
+        library_exists "libxxhash.so" && \
+        header_exists "msgpack.hpp"
+}
+
+install_system_dependencies() {
+    print_section "Installing system development packages required by Mooncake"
+
+    if command -v apt-get >/dev/null 2>&1; then
+        run_or_die "Failed to update apt package metadata" \
+            env DEBIAN_FRONTEND=noninteractive apt-get update
+        run_or_die "Failed to install apt development packages" \
+            env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                libzstd-dev \
+                libxxhash-dev \
+                libmsgpack-cxx-dev
+        print_success \
+            "Installed apt packages: libzstd-dev libxxhash-dev libmsgpack-cxx-dev"
+        return
+    fi
+
+    if command -v dnf >/dev/null 2>&1; then
+        run_or_die "Failed to install dnf development packages" \
+            dnf install -y zstd-devel xxhash-devel
+        print_success "Installed dnf packages: zstd-devel xxhash-devel"
+        return
+    fi
+
+    if command -v yum >/dev/null 2>&1; then
+        run_or_die "Failed to install yum development packages" \
+            yum install -y zstd-devel xxhash-devel
+        print_success "Installed yum packages: zstd-devel xxhash-devel"
+        return
+    fi
+
+    print_error \
+        "Unsupported package manager. Install zstd, xxHash, and msgpack-cxx development packages manually."
+}
+
 install_msgpack_cxx_headers() {
+    if header_exists "msgpack.hpp"; then
+        print_success "msgpack-cxx headers are already installed"
+        return
+    fi
+
     print_section "Installing msgpack-cxx headers"
 
     local version="cpp-6.1.0"
@@ -162,9 +212,24 @@ main() {
     ensure_dir "${INSTALL_PREFIX}" "Failed to create install directory: ${INSTALL_PREFIX}"
     echo -e "${YELLOW}Installing to: ${INSTALL_PREFIX}${NC}"
 
-    install_mooncake_system_devel
+    if system_dependencies_ready; then
+        print_success "Mooncake system development dependencies are already installed"
+    else
+        install_system_dependencies
+    fi
+
     install_msgpack_cxx_headers
-    install_yalantinglibs
+
+    if [ -f "${INSTALL_PREFIX}/lib/cmake/yalantinglibs/config.cmake" ]; then
+        print_success "yalantinglibs is already installed to ${INSTALL_PREFIX}"
+    else
+        install_yalantinglibs
+    fi
+
+    if ! system_dependencies_ready; then
+        print_error \
+            "Mooncake dependencies are incomplete after installation. Check zstd, xxHash, and msgpack-cxx development files."
+    fi
 }
 
 main "$@"
