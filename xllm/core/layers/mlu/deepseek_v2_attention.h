@@ -92,11 +92,6 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     torch::Tensor v_input;
   };
 
-  struct ResolvedMlaMetadata {
-    AttentionMetadata attention;
-    std::optional<DsaTopkState> topk_state;
-  };
-
   torch::Tensor forward_normal_tp(const torch::Tensor& positions,
                                   const torch::Tensor& hidden_states,
                                   const AttentionMetadata& attn_metadata,
@@ -155,20 +150,26 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                           bool enable_fused_qkv,
                           bool use_prompt_rope);
 
-  ResolvedMlaMetadata build_mla_attention_metadata(
-      const torch::Tensor& positions,
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& q_norm,
+  void update_mla_k_cache(
       const torch::Tensor& k_input,
       const AttentionMetadata& attn_metadata,
       KVCache& kv_cache,
       std::optional<torch::Tensor> k_cache_scale,
       bool is_prefill_phase,
-      const std::optional<torch::Tensor>& slot_mapping = std::nullopt,
+      const std::optional<torch::Tensor>& slot_mapping = std::nullopt) const;
+
+  std::optional<DsaTopkState> resolve_dsa_topk_state(
+      const torch::Tensor& positions,
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& q_norm,
+      const AttentionMetadata& attn_metadata,
+      KVCache& kv_cache,
+      bool is_prefill_phase,
       const DsaTopkState* external_topk = nullptr);
 
-  void publish_topk_output(DsaTopkTransfer* topk_transfer,
-                           const std::optional<DsaTopkState>& topk_state) const;
+  AttentionMetadata build_mla_attention_metadata(
+      const AttentionMetadata& attn_metadata,
+      const std::optional<DsaTopkState>& topk_state) const;
 
   torch::Tensor project_output(const torch::Tensor& attn_output,
                                const HeadInfo& heads);

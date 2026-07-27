@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <utility>
 
 namespace xllm::layer {
@@ -52,6 +53,27 @@ class DsaTopkState final {
 
   const torch::Tensor& block_tables() const { return block_tables_; }
   const torch::Tensor& context_lens() const { return context_lens_; }
+
+  void validate_for_attention(int64_t expected_rows,
+                              int64_t expected_width,
+                              const torch::Device& expected_device) const {
+    CHECK_EQ(block_tables_.dim(), 2)
+        << "DSA top-k block tables must be a 2-D tensor for attention.";
+    CHECK_EQ(block_tables_.size(0), expected_rows)
+        << "DSA top-k block table row count must match the current attention "
+           "invocation.";
+    CHECK_EQ(block_tables_.size(1), expected_width)
+        << "DSA top-k block table width must match the configured attention "
+           "top-k.";
+    CHECK(block_tables_.is_contiguous())
+        << "DSA top-k block tables must be contiguous for attention.";
+    CHECK(context_lens_.is_contiguous())
+        << "DSA top-k context lens must be contiguous for attention.";
+    CHECK(block_tables_.device() == expected_device)
+        << "DSA top-k block tables must use the attention device.";
+    CHECK(context_lens_.device() == expected_device)
+        << "DSA top-k context lens must use the attention device.";
+  }
 
   DsaTopkState flattened() const {
     if (block_tables_.dim() == 2) {

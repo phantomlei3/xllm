@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -1811,6 +1812,89 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
   EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::mtp_topk_reuse(*decoder));
   EXPECT_TRUE(
       DeepseekV2DecoderLayerTestPeer::attention_has_child(*decoder, "indexer"));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       MtpForwardComputesThenReusesTopkAcrossSteps) {
+  configure_glm5_indexer();
+  model_args_.model_type() = "glm_moe_dsa_mtp";
+  model_args_.mtp_mlp_type() = "dense";
+  model_args_.index_n_heads() = 32;
+  model_args_.kv_lora_rank() = 256;
+  model_args_.v_head_dim() = 128;
+  model_args_.first_k_dense_replace() = kNumLayers + 1;
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_share_for_mtp_iteration() = true;
+  refresh_ctx();
+
+  DecoderHolder decoder = make_loaded_decoder(/*layer_id=*/kNumLayers);
+  constexpr int64_t kBatchSize = 1;
+  constexpr int64_t kSeqLen = 1;
+  constexpr int64_t kBlockSize = 16;
+  KVCacheConfig::get_instance().block_size(kBlockSize);
+  ModelInputParams input_params = build_prefill_params(kBatchSize, kSeqLen);
+  input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  AttentionMetadata attn_metadata =
+      AttentionMetadataBuilder::build(input_params, /*enable_mla=*/true);
+  const torch::Tensor initial_hidden =
+      test::seeded_tensor("deepseek_v2_decoder.mtp_topk_hidden",
+                          {kBatchSize, model_args_.hidden_size()},
+                          torch::kBFloat16,
+                          options_.device());
+  torch::Tensor positions = torch::zeros(
+      {kBatchSize},
+      torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
+
+  KVCache first_cache =
+      build_cache(/*block_num=*/kBatchSize + 1, /*block_size=*/kBlockSize);
+  torch::Tensor first_hidden = initial_hidden.clone();
+  std::optional<torch::Tensor> first_residual = std::nullopt;
+  std::optional<DsaTopkState> first_topk_output = std::nullopt;
+  torch::Tensor first_output = decoder->forward_mtp(first_hidden,
+                                                    first_residual,
+                                                    positions,
+                                                    attn_metadata,
+                                                    first_cache,
+                                                    input_params,
+                                                    /*input_ids=*/std::nullopt,
+                                                    /*topk_input=*/std::nullopt,
+                                                    first_topk_output);
+  sync_dev();
+
+  ASSERT_TRUE(first_topk_output.has_value());
+  const DsaTopkState& first_topk = first_topk_output.value();
+  EXPECT_EQ(first_topk.block_tables().sizes(),
+            torch::IntArrayRef({kBatchSize, model_args_.index_topk()}));
+  EXPECT_EQ(first_topk.context_lens().sizes(),
+            torch::IntArrayRef({kBatchSize}));
+  EXPECT_TRUE(first_topk.block_tables().is_contiguous());
+  EXPECT_TRUE(first_topk.context_lens().is_contiguous());
+
+  KVCache second_cache =
+      build_cache(/*block_num=*/kBatchSize + 1, /*block_size=*/kBlockSize);
+  torch::Tensor second_hidden = initial_hidden.clone();
+  std::optional<torch::Tensor> second_residual = std::nullopt;
+  std::optional<DsaTopkState> second_topk_output = std::nullopt;
+  torch::Tensor second_output = decoder->forward_mtp(second_hidden,
+                                                     second_residual,
+                                                     positions,
+                                                     attn_metadata,
+                                                     second_cache,
+                                                     input_params,
+                                                     /*input_ids=*/std::nullopt,
+                                                     first_topk_output,
+                                                     second_topk_output);
+  sync_dev();
+
+  ASSERT_TRUE(second_topk_output.has_value());
+  const DsaTopkState& second_topk = second_topk_output.value();
+  EXPECT_EQ(second_topk.block_tables().data_ptr(),
+            first_topk.block_tables().data_ptr());
+  EXPECT_EQ(second_topk.context_lens().data_ptr(),
+            first_topk.context_lens().data_ptr());
+  test::verify_tensor_close(
+      second_output, first_output, /*rtol=*/1e-3, /*atol=*/1e-2);
 }
 
 TEST_F(DeepseekV2DecoderTopkShareTest, PatternWithOnlyFullLayersHasNoReuse) {

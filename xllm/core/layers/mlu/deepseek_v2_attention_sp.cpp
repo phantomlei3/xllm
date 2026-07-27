@@ -37,18 +37,19 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
   auto k_cache_scale = kv_cache.get_k_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
 
-  std::optional<DsaTopkState> computed_topk;
+  std::optional<DsaTopkState> topk_state;
   v32_cp::PaddedGatherHandle mla_handle;
   IndexerSPPreOut index_pre;
   v32_cp::PaddedGatherHandle index_handle;
   const DsaTopkState* reused_topk =
       topk_transfer != nullptr ? topk_transfer->input() : nullptr;
+  const bool compute_topk = !attn_metadata.is_dummy && reused_topk == nullptr;
 
   Device device(hidden_states.device());
   if (sp_comm_stream_ == nullptr) {
     sp_comm_stream_ = device.get_stream_from_pool();
   }
-  if (reused_topk == nullptr) {
+  if (compute_topk) {
     index_pre = indexer_->sp_pre(hidden_states,
                                  query_prep.q_norm,
                                  positions,
@@ -67,7 +68,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
       build_sp_mla_inputs(hidden_states, positions, query_prep, sp_ctx);
 
   torch::Tensor k_gathered;
-  if (reused_topk == nullptr) {
+  if (compute_topk) {
     k_gathered = indexer_->sp_wait_k(index_pre.k_local, index_handle, sp_ctx);
   }
   auto compute_stream = device.current_stream();
@@ -76,7 +77,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
     mla_handle = sp_mla_comm(mla_inputs.k_input, sp_ctx);
   }
-  if (reused_topk == nullptr) {
+  if (compute_topk) {
     torch::Tensor index_cache = kv_cache.get_index_cache();
     auto index_cache_scale = kv_cache.get_indexer_cache_scale();
     auto index_out = indexer_->sp_post(index_pre,
@@ -86,29 +87,37 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                        sp_ctx.gathered_slot_mapping,
                                        sp_ctx,
                                        index_cache_scale);
-    computed_topk.emplace(std::get<0>(index_out), std::get<1>(index_out));
+    topk_state.emplace(std::get<0>(index_out), std::get<1>(index_out));
   }
   finish_sp_k_gather(mla_inputs, mla_handle, sp_ctx);
 
-  const DsaTopkState* resolved_topk =
-      reused_topk != nullptr ? reused_topk : &computed_topk.value();
-  ResolvedMlaMetadata resolved_metadata =
-      build_mla_attention_metadata(positions,
-                                   hidden_states,
-                                   mla_inputs.q_norm,
-                                   mla_inputs.k_input,
-                                   attn_metadata,
-                                   kv_cache,
-                                   k_cache_scale,
-                                   is_prefill_or_chunked_prefill,
-                                   sp_ctx.gathered_slot_mapping,
-                                   resolved_topk);
-  publish_topk_output(topk_transfer, resolved_metadata.topk_state);
-  resolved_metadata.attention.q_cu_seq_lens =
-      sp_ctx.local_attn_metadata.q_cu_seq_lens;
-  resolved_metadata.attention.max_query_len =
-      sp_ctx.local_attn_metadata.max_query_len;
-  auto [attn_output_local, output_lse] = attn_(resolved_metadata.attention,
+  if (attn_metadata.is_dummy) {
+    topk_state.reset();
+  } else {
+    if (reused_topk != nullptr) {
+      topk_state = *reused_topk;
+    }
+    CHECK(topk_state.has_value())
+        << "DSA sequence-parallel attention requires top-k state.";
+    topk_state->validate_for_attention(
+        mla_inputs.q_input.size(0), index_topk_, hidden_states.device());
+  }
+
+  update_mla_k_cache(mla_inputs.k_input,
+                     attn_metadata,
+                     kv_cache,
+                     k_cache_scale,
+                     is_prefill_or_chunked_prefill,
+                     sp_ctx.gathered_slot_mapping);
+  if (topk_transfer != nullptr) {
+    topk_transfer->complete(topk_state);
+  }
+
+  AttentionMetadata kernel_metadata =
+      build_mla_attention_metadata(attn_metadata, topk_state);
+  kernel_metadata.q_cu_seq_lens = sp_ctx.local_attn_metadata.q_cu_seq_lens;
+  kernel_metadata.max_query_len = sp_ctx.local_attn_metadata.max_query_len;
+  auto [attn_output_local, output_lse] = attn_(kernel_metadata,
                                                mla_inputs.q_input,
                                                mla_inputs.k_input,
                                                mla_inputs.v_input,

@@ -351,82 +351,88 @@ void DeepseekV2AttentionImpl::prepare_mla_inputs(
   }
 }
 
-DeepseekV2AttentionImpl::ResolvedMlaMetadata
-DeepseekV2AttentionImpl::build_mla_attention_metadata(
-    const torch::Tensor& positions,
-    const torch::Tensor& hidden_states,
-    const torch::Tensor& q_norm,
+void DeepseekV2AttentionImpl::update_mla_k_cache(
     const torch::Tensor& k_input,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     std::optional<torch::Tensor> k_cache_scale,
     bool is_prefill_phase,
-    const std::optional<torch::Tensor>& slot_mapping,
-    const DsaTopkState* external_topk) {
-  // reshape_paged_cache before attn
-  // since the reshape_paged_cache and indexer_ does not involve any
-  // communication, we will skip them if it is dummy run in data parallel
-  ResolvedMlaMetadata resolved = {
-      .attention = attn_metadata,
-      .topk_state = std::nullopt,
-  };
-  if (!attn_metadata.is_dummy) {
-    // mla prefill save cache before flashattn
-    if (is_prefill_phase) {
-      auto key = k_input.unsqueeze(1);
-      xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
-      reshape_paged_cache_params.key = key;
-      reshape_paged_cache_params.k_cache = kv_cache.get_k_cache();
-      reshape_paged_cache_params.slot_mapping =
-          slot_mapping.value_or(attn_metadata.slot_mapping);
-      if (k_cache_scale.has_value()) {
-        // Use quant_to_paged_cache for INT8 quantization
-        reshape_paged_cache_params.k_cache_scale = k_cache_scale;
-        xllm::kernel::quant_to_paged_cache(reshape_paged_cache_params);
-      } else {
-        // Use standard reshape_paged_cache
-        xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
-      }
-    }
-    // indexer and update index params for attn
-    resolved.attention.compute_dtype = "half";
-    if (external_topk != nullptr) {
-      resolved.topk_state = *external_topk;
-    } else if (has_indexer_) {
-      auto index_cache = kv_cache.get_index_cache();
-      auto index_cache_scale = kv_cache.get_indexer_cache_scale();
-      auto [block_tables, context_lens] = indexer_(hidden_states,
-                                                   q_norm,
-                                                   positions,
-                                                   index_cache,
-                                                   attn_metadata,
-                                                   is_prefill_phase,
-                                                   index_cache_scale,
-                                                   std::nullopt);
-      resolved.topk_state.emplace(block_tables, context_lens);
-    } else {
-      CHECK(!enable_lighting_indexer_)
-          << "Shared DSA layer requires externally supplied top-k metadata.";
-    }
-    if (resolved.topk_state.has_value()) {
-      resolved.attention.block_table = resolved.topk_state->block_tables();
-      resolved.attention.kv_seq_lens = resolved.topk_state->context_lens();
-      resolved.attention.max_seq_len = index_topk_;
-    }
+    const std::optional<torch::Tensor>& slot_mapping) const {
+  // Cache updates can be skipped for a data-parallel dummy run because they
+  // do not involve communication.
+  if (attn_metadata.is_dummy || !is_prefill_phase) {
+    return;
   }
-  return resolved;
+
+  torch::Tensor key = k_input.unsqueeze(1);
+  xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
+  reshape_paged_cache_params.key = key;
+  reshape_paged_cache_params.k_cache = kv_cache.get_k_cache();
+  reshape_paged_cache_params.slot_mapping =
+      slot_mapping.value_or(attn_metadata.slot_mapping);
+  if (k_cache_scale.has_value()) {
+    reshape_paged_cache_params.k_cache_scale = k_cache_scale;
+    xllm::kernel::quant_to_paged_cache(reshape_paged_cache_params);
+  } else {
+    xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
+  }
 }
 
-void DeepseekV2AttentionImpl::publish_topk_output(
-    DsaTopkTransfer* topk_transfer,
+std::optional<DsaTopkState> DeepseekV2AttentionImpl::resolve_dsa_topk_state(
+    const torch::Tensor& positions,
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& q_norm,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    bool is_prefill_phase,
+    const DsaTopkState* external_topk) {
+  if (attn_metadata.is_dummy) {
+    return std::nullopt;
+  }
+
+  std::optional<DsaTopkState> topk_state;
+  if (external_topk != nullptr) {
+    topk_state = *external_topk;
+  } else if (has_indexer_) {
+    torch::Tensor index_cache = kv_cache.get_index_cache();
+    std::optional<torch::Tensor> index_cache_scale =
+        kv_cache.get_indexer_cache_scale();
+    auto [block_tables, context_lens] = indexer_(hidden_states,
+                                                 q_norm,
+                                                 positions,
+                                                 index_cache,
+                                                 attn_metadata,
+                                                 is_prefill_phase,
+                                                 index_cache_scale,
+                                                 std::nullopt);
+    topk_state.emplace(block_tables, context_lens);
+  } else {
+    CHECK(!enable_lighting_indexer_)
+        << "Shared DSA layer requires externally supplied top-k metadata.";
+  }
+
+  if (topk_state.has_value()) {
+    topk_state->validate_for_attention(
+        hidden_states.size(0), index_topk_, hidden_states.device());
+  }
+  return topk_state;
+}
+
+AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
+    const AttentionMetadata& attn_metadata,
     const std::optional<DsaTopkState>& topk_state) const {
-  if (topk_transfer == nullptr || !topk_transfer->captures_output()) {
-    return;
+  AttentionMetadata kernel_metadata = attn_metadata;
+  if (attn_metadata.is_dummy) {
+    return kernel_metadata;
   }
-  if (!topk_state.has_value()) {
-    return;
+
+  kernel_metadata.compute_dtype = "half";
+  if (topk_state.has_value()) {
+    kernel_metadata.block_table = topk_state->block_tables();
+    kernel_metadata.kv_seq_lens = topk_state->context_lens();
+    kernel_metadata.max_seq_len = index_topk_;
   }
-  topk_transfer->publish_output(topk_state.value());
+  return kernel_metadata;
 }
 
 torch::Tensor DeepseekV2AttentionImpl::project_output(
@@ -515,27 +521,31 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
   k_input = k_input.view({k_input.size(0), -1});
   v_input = v_input.view({v_input.size(0), -1});
 
-  // A Shared layer feeds the previous Full layer's complete sparse state so
-  // the metadata builder takes its external branch and skips indexer
-  // recompute.
+  update_mla_k_cache(k_input,
+                     attn_metadata,
+                     kv_cache,
+                     k_cache_scale,
+                     is_prefill_or_chunked_prefill);
+
   const DsaTopkState* external_topk =
       topk_transfer != nullptr ? topk_transfer->input() : nullptr;
-  ResolvedMlaMetadata resolved_metadata =
-      build_mla_attention_metadata(positions,
-                                   hidden_states,
-                                   q_norm,
-                                   k_input,
-                                   attn_metadata,
-                                   kv_cache,
-                                   k_cache_scale,
-                                   is_prefill_or_chunked_prefill,
-                                   /*slot_mapping=*/std::nullopt,
-                                   external_topk);
-  publish_topk_output(topk_transfer, resolved_metadata.topk_state);
+  std::optional<DsaTopkState> topk_state =
+      resolve_dsa_topk_state(positions,
+                             hidden_states,
+                             q_norm,
+                             attn_metadata,
+                             kv_cache,
+                             is_prefill_or_chunked_prefill,
+                             external_topk);
+  if (topk_transfer != nullptr) {
+    topk_transfer->complete(topk_state);
+  }
+  AttentionMetadata kernel_metadata =
+      build_mla_attention_metadata(attn_metadata, topk_state);
 
   // mla forward
   auto [attn_output, output_lse] =
-      attn_(resolved_metadata.attention, q_input, k_input, v_input, kv_cache);
+      attn_(kernel_metadata, q_input, k_input, v_input, kv_cache);
 
   return project_output(attn_output, heads);
 }
