@@ -99,8 +99,6 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     }
     CHECK(topk_state.has_value())
         << "DSA sequence-parallel attention requires top-k state.";
-    topk_state->validate_for_attention(
-        mla_inputs.q_input.size(0), index_topk_, hidden_states.device());
   }
 
   update_mla_k_cache(mla_inputs.k_input,

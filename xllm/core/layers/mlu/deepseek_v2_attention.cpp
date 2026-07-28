@@ -411,10 +411,6 @@ std::optional<DsaTopkState> DeepseekV2AttentionImpl::resolve_dsa_topk_state(
         << "Shared DSA layer requires externally supplied top-k metadata.";
   }
 
-  if (topk_state.has_value()) {
-    topk_state->validate_for_attention(
-        hidden_states.size(0), index_topk_, hidden_states.device());
-  }
   return topk_state;
 }
 
