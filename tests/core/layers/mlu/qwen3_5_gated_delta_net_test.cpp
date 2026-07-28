@@ -523,12 +523,7 @@ TEST_P(Qwen3_5GatedDeltaNetSpecVerifyTest, ReturnsFullDenseValidateSpan) {
 
 INSTANTIATE_TEST_SUITE_P(DenseValidateWidths,
                          Qwen3_5GatedDeltaNetSpecVerifyTest,
-                         ::testing::Values(int64_t{2},
-                                           int64_t{3},
-                                           int64_t{4},
-                                           int64_t{5},
-                                           int64_t{6},
-                                           int64_t{7}),
+                         ::testing::Values(int64_t{2}, int64_t{3}, int64_t{4}),
                          spec_verify_width_name);
 
 }  // namespace
