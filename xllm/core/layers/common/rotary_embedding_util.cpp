@@ -21,9 +21,11 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <cmath>
 #include <memory>
+#include <numeric>
 
 #include "core/common/global_flags.h"
 #include "core/platform/device.h"
+#include "core/platform/platform.h"
 #include "core/util/slice.h"
 
 namespace xllm {
@@ -367,103 +369,127 @@ torch::Tensor get_concat_rotary_embedding(int64_t dim,
   return compute_rotary_embedding(dim, seq_len, rope_theta, options, true);
 }
 
-std::pair<torch::Tensor, torch::Tensor> apply_mlu_mrope(
+namespace {
+
+// Preserve Qwen3.5's interleaved THWTHW... layout with step-3 slice
+// assignment. This avoids temporary index tensors and some contiguous copies,
+// which can be faster on backends with efficient slice assignment.
+std::pair<torch::Tensor, torch::Tensor> apply_sliced_mrope(
     const torch::Tensor& cos_sin_cache,
     const torch::Tensor& positions,
     const std::vector<int64_t>& mrope_section) {
-  torch::Tensor mrope_positions = positions;
-  if (positions.dim() == 1) {
-    mrope_positions = positions.expand({3, -1});
-  }
-  CHECK_EQ(mrope_positions.dim(), 2) << "MLU mRoPE positions must be 2D";
-  CHECK_GE(mrope_section.size(), static_cast<size_t>(3))
-      << "MLU mRoPE requires three sections";
+  torch::Tensor target_cos_sin = cos_sin_cache.index({positions});
+  std::vector<torch::Tensor> target_cos_sin_chunks =
+      target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
+  auto apply = [&](const torch::Tensor& values) {
+    torch::Tensor freqs = values[0].clone();
+    int64_t half_rotary_dim = freqs.size(-1) / 2;
 
-  auto target_cos_sin = cos_sin_cache.index({mrope_positions});
-  auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
-  auto apply = [&](const torch::Tensor& x) {
-    auto freqs_t = x[0].clone();
-    int64_t half_rotary_dim = static_cast<int64_t>(freqs_t.size(-1) / 2);
-
-    freqs_t.index_put_(
-        {torch::indexing::Ellipsis,
-         torch::indexing::Slice(1, mrope_section[1] * 3, /*step=*/3)},
-        x[1].index(
-            {torch::indexing::Ellipsis,
-             torch::indexing::Slice(1, mrope_section[1] * 3, /*step=*/3)}));
-    freqs_t.index_put_(
-        {torch::indexing::Ellipsis,
-         torch::indexing::Slice(2, mrope_section[2] * 3, /*step=*/3)},
-        x[2].index(
-            {torch::indexing::Ellipsis,
-             torch::indexing::Slice(2, mrope_section[2] * 3, /*step=*/3)}));
-    freqs_t.index_put_(
-        {torch::indexing::Ellipsis,
-         torch::indexing::Slice(1 + half_rotary_dim,
-                                mrope_section[1] * 3 + half_rotary_dim,
-                                /*step=*/3)},
-        x[1].index(
-            {torch::indexing::Ellipsis,
-             torch::indexing::Slice(1 + half_rotary_dim,
-                                    mrope_section[1] * 3 + half_rotary_dim,
-                                    /*step=*/3)}));
-    freqs_t.index_put_(
-        {torch::indexing::Ellipsis,
-         torch::indexing::Slice(2 + half_rotary_dim,
-                                mrope_section[2] * 3 + half_rotary_dim,
-                                /*step=*/3)},
-        x[2].index(
-            {torch::indexing::Ellipsis,
-             torch::indexing::Slice(2 + half_rotary_dim,
-                                    mrope_section[2] * 3 + half_rotary_dim,
-                                    /*step=*/3)}));
-    return freqs_t;
+    for (int32_t axis = 1; axis <= 2; ++axis) {
+      int64_t section_len = mrope_section[axis];
+      if (section_len == 0) {
+        continue;
+      }
+      int64_t slice_end = section_len * 3;
+      freqs.index_put_({torch::indexing::Ellipsis,
+                        torch::indexing::Slice(axis, slice_end, /*step=*/3)},
+                       values[axis].index({torch::indexing::Ellipsis,
+                                           torch::indexing::Slice(
+                                               axis, slice_end, /*step=*/3)}));
+      freqs.index_put_({torch::indexing::Ellipsis,
+                        torch::indexing::Slice(axis + half_rotary_dim,
+                                               slice_end + half_rotary_dim,
+                                               /*step=*/3)},
+                       values[axis].index(
+                           {torch::indexing::Ellipsis,
+                            torch::indexing::Slice(axis + half_rotary_dim,
+                                                   slice_end + half_rotary_dim,
+                                                   /*step=*/3)}));
+    }
+    return freqs;
   };
   return std::make_pair(apply(target_cos_sin_chunks[0]),
                         apply(target_cos_sin_chunks[1]));
 }
 
-std::pair<torch::Tensor, torch::Tensor> apply_mrope(
+std::pair<torch::Tensor, torch::Tensor> apply_indexed_mrope(
     const torch::Tensor& cos_sin_cache,
     const torch::Tensor& positions,
     const std::vector<int64_t>& mrope_section) {
-#if defined(USE_MLU)
-  return apply_mlu_mrope(cos_sin_cache, positions, mrope_section);
-#else
-
   torch::Tensor target_cos_sin = cos_sin_cache.index({positions});
   std::vector<torch::Tensor> target_cos_sin_chunks =
       target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
   torch::Tensor cos_pos = target_cos_sin_chunks[0].contiguous();
   torch::Tensor sin_pos = target_cos_sin_chunks[1].contiguous();
   torch::TensorOptions index_options = positions.options().dtype(torch::kLong);
-  auto apply = [&](torch::Tensor values) {
-    torch::Tensor freqs_t = values[0].clone();
-    int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
+  auto apply = [&](const torch::Tensor& values) {
+    torch::Tensor freqs = values[0].clone();
+    int64_t half_rotary_dim = freqs.size(-1) / 2;
 
-    for (int32_t dim_idx = 1; dim_idx <= 2; ++dim_idx) {
-      const int64_t section_len = mrope_section[dim_idx];
-      if (section_len <= 0) {
+    for (int32_t axis = 1; axis <= 2; ++axis) {
+      int64_t section_len = mrope_section[axis];
+      if (section_len == 0) {
         continue;
       }
-      const int64_t offset = dim_idx;
-      const int64_t length = section_len * 3;
+      int64_t slice_end = section_len * 3;
 
       torch::Tensor idx_first_half =
-          torch::arange(offset, length, 3, index_options);
-      torch::Tensor idx_second_half = torch::arange(
-          offset + mrop_length, length + mrop_length, 3, index_options);
+          torch::arange(axis, slice_end, 3, index_options);
+      torch::Tensor idx_second_half = torch::arange(axis + half_rotary_dim,
+                                                    slice_end + half_rotary_dim,
+                                                    3,
+                                                    index_options);
       torch::Tensor idx_tensor =
           torch::cat({idx_first_half, idx_second_half}, 0).to(values.device());
-      torch::Tensor src = values[dim_idx].index_select(-1, idx_tensor);
-      freqs_t.index_copy_(-1, idx_tensor, src);
+      torch::Tensor src = values[axis].index_select(-1, idx_tensor);
+      freqs.index_copy_(-1, idx_tensor, src);
     }
-    return freqs_t;
+    return freqs;
   };
-  cos_pos = apply(cos_pos.reshape({positions.size(0), -1, cos_pos.size(-1)}));
-  sin_pos = apply(sin_pos.reshape({positions.size(0), -1, cos_pos.size(-1)}));
+  cos_pos = apply(cos_pos);
+  sin_pos = apply(sin_pos);
   return std::make_pair(cos_pos, sin_pos);
-#endif
+}
+
+}  // namespace
+
+std::pair<torch::Tensor, torch::Tensor> apply_mrope(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    const std::vector<int64_t>& mrope_section) {
+  CHECK(cos_sin_cache.defined()) << "mRoPE cos_sin_cache must be defined";
+  CHECK_EQ(cos_sin_cache.dim(), 2) << "mRoPE cos_sin_cache must be 2D";
+  CHECK(positions.defined()) << "mRoPE positions must be defined";
+  CHECK(positions.dim() == 1 || positions.dim() == 2)
+      << "mRoPE positions must be 1D or 2D";
+  if (positions.dim() == 2) {
+    CHECK_EQ(positions.size(0), 3) << "mRoPE positions must have 3 axes";
+  }
+  CHECK_EQ(mrope_section.size(), static_cast<size_t>(3))
+      << "mRoPE requires exactly 3 sections";
+  for (int64_t section : mrope_section) {
+    CHECK_GE(section, 0) << "mRoPE sections must be non-negative";
+  }
+
+  int64_t cache_width = cos_sin_cache.size(-1);
+  CHECK_GT(cache_width, 0)
+      << "mRoPE cache width must be positive and divisible by 4";
+  CHECK_EQ(cache_width % 4, 0)
+      << "mRoPE cache width must be positive and divisible by 4";
+  int64_t half_rotary_dim = cache_width / 4;
+  int64_t section_sum =
+      std::accumulate(mrope_section.begin(), mrope_section.end(), int64_t{0});
+  CHECK_EQ(section_sum, half_rotary_dim)
+      << "mRoPE section sum must equal half rotary dimension";
+
+  torch::Tensor mrope_positions = positions;
+  if (positions.dim() == 1) {
+    mrope_positions = positions.expand({3, -1});
+  }
+  if (Platform::prefers_sliced_mrope()) {
+    return apply_sliced_mrope(cos_sin_cache, mrope_positions, mrope_section);
+  }
+  return apply_indexed_mrope(cos_sin_cache, mrope_positions, mrope_section);
 }
 
 #if defined(USE_MUSA)
