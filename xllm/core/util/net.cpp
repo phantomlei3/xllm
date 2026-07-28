@@ -28,7 +28,6 @@ limitations under the License.
 #include <mutex>
 #include <sstream>
 #include <unordered_set>
-#include <utility>
 
 namespace xllm {
 namespace net {
@@ -37,10 +36,6 @@ namespace {
 
 std::mutex g_port_mutex;
 std::unordered_set<int> g_allocated_port_map;
-
-bool is_loopback(const sockaddr_in& addr) {
-  return (ntohl(addr.sin_addr.s_addr) & 0xff000000U) == 0x7f000000U;
-}
 
 std::string to_ip_addr(const sockaddr_in& addr) {
   char ip[INET_ADDRSTRLEN]{'\0'};
@@ -56,6 +51,7 @@ std::string to_ip_addr(const sockaddr_in& addr) {
 
 // TODO: return private ip
 std::string get_local_ip_addr() {
+  char ip[INET_ADDRSTRLEN]{'\0'};
   char hostname[256];
   int ret = gethostname(hostname, sizeof(hostname));
   if (ret != 0) {
@@ -74,27 +70,18 @@ std::string get_local_ip_addr() {
   }
   std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(info,
                                                                   freeaddrinfo);
-  std::string loopback_addr;
-  for (const struct addrinfo* current = info; current != nullptr;
-       current = current->ai_next) {
-    const sockaddr_in* addr =
-        reinterpret_cast<const sockaddr_in*>(current->ai_addr);
-    std::string ip = to_ip_addr(*addr);
-    if (ip.empty()) {
-      continue;
-    }
-    if (!is_loopback(*addr)) {
-      return ip;
-    }
-    if (loopback_addr.empty()) {
-      loopback_addr = std::move(ip);
-    }
+  const sockaddr_in* addr = reinterpret_cast<const sockaddr_in*>(info->ai_addr);
+  const char* result =
+      inet_ntop(addr->sin_family, &addr->sin_addr, ip, sizeof(ip));
+  if (result == nullptr) {
+    LOG(ERROR) << "inet_ntop failed";
+    return "";
   }
 
-  return loopback_addr;
+  return std::string(ip);
 }
 
-std::string get_local_ip_addr_for_remote(const std::string& remote_addr) {
+std::string get_route_ip(const std::string& remote_addr) {
   std::string remote_host;
   int remote_port = 0;
   parse_host_port_from_addr(remote_addr, remote_host, remote_port);
@@ -114,13 +101,8 @@ std::string get_local_ip_addr_for_remote(const std::string& remote_addr) {
   std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(info,
                                                                   freeaddrinfo);
 
-  bool has_non_loopback_remote = false;
   for (const struct addrinfo* current = info; current != nullptr;
        current = current->ai_next) {
-    const sockaddr_in* remote =
-        reinterpret_cast<const sockaddr_in*>(current->ai_addr);
-    has_non_loopback_remote = has_non_loopback_remote || !is_loopback(*remote);
-
     const int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
       continue;
@@ -141,27 +123,13 @@ std::string get_local_ip_addr_for_remote(const std::string& remote_addr) {
     }
 
     std::string local_ip = to_ip_addr(local);
-    if (!local_ip.empty() && (!is_loopback(local) || is_loopback(*remote))) {
+    if (!local_ip.empty()) {
       return local_ip;
     }
   }
 
-  std::string local_ip = get_local_ip_addr();
-  if (has_non_loopback_remote && !local_ip.empty()) {
-    in_addr addr;
-    if (inet_pton(AF_INET, local_ip.c_str(), &addr) == 1) {
-      sockaddr_in local;
-      memset(&local, 0, sizeof(local));
-      local.sin_family = AF_INET;
-      local.sin_addr = addr;
-      if (is_loopback(local)) {
-        LOG(ERROR) << "No routable local address found for remote address "
-                   << remote_addr;
-        return "";
-      }
-    }
-  }
-  return local_ip;
+  LOG(ERROR) << "No local route found for remote address " << remote_addr;
+  return "";
 }
 
 int get_local_free_port() {
