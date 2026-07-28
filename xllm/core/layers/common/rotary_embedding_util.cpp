@@ -21,7 +21,6 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <cmath>
 #include <memory>
-#include <numeric>
 
 #include "core/common/global_flags.h"
 #include "core/platform/device.h"
@@ -457,31 +456,6 @@ std::pair<torch::Tensor, torch::Tensor> apply_mrope(
     const torch::Tensor& cos_sin_cache,
     const torch::Tensor& positions,
     const std::vector<int64_t>& mrope_section) {
-  CHECK(cos_sin_cache.defined()) << "mRoPE cos_sin_cache must be defined";
-  CHECK_EQ(cos_sin_cache.dim(), 2) << "mRoPE cos_sin_cache must be 2D";
-  CHECK(positions.defined()) << "mRoPE positions must be defined";
-  CHECK(positions.dim() == 1 || positions.dim() == 2)
-      << "mRoPE positions must be 1D or 2D";
-  if (positions.dim() == 2) {
-    CHECK_EQ(positions.size(0), 3) << "mRoPE positions must have 3 axes";
-  }
-  CHECK_EQ(mrope_section.size(), static_cast<size_t>(3))
-      << "mRoPE requires exactly 3 sections";
-  for (int64_t section : mrope_section) {
-    CHECK_GE(section, 0) << "mRoPE sections must be non-negative";
-  }
-
-  int64_t cache_width = cos_sin_cache.size(-1);
-  CHECK_GT(cache_width, 0)
-      << "mRoPE cache width must be positive and divisible by 4";
-  CHECK_EQ(cache_width % 4, 0)
-      << "mRoPE cache width must be positive and divisible by 4";
-  int64_t half_rotary_dim = cache_width / 4;
-  int64_t section_sum =
-      std::accumulate(mrope_section.begin(), mrope_section.end(), int64_t{0});
-  CHECK_EQ(section_sum, half_rotary_dim)
-      << "mRoPE section sum must equal half rotary dimension";
-
   torch::Tensor mrope_positions = positions;
   if (positions.dim() == 1) {
     mrope_positions = positions.expand({3, -1});
