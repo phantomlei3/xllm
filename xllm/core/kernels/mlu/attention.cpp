@@ -173,6 +173,17 @@ void batch_decode(const torch::Tensor& query,
                                               kv_cache_quant_bit_size);
 }
 
+void update_out_and_lse(torch::Tensor& out,
+                        torch::Tensor& lse,
+                        const torch::Tensor& block_out,
+                        const torch::Tensor& block_lse,
+                        const std::optional<torch::Tensor>& seq_offsets,
+                        const std::optional<torch::Tensor>& cu_seqs,
+                        const std::optional<torch::Tensor>& block_cu_seqs) {
+  tmo::torch_api::update_out_and_lse(
+      out, lse, block_out, block_lse, seq_offsets, cu_seqs, block_cu_seqs);
+}
+
 void masked_indexer_select_paged_kv(
     const torch::Tensor& query,
     const torch::Tensor& k_cache,

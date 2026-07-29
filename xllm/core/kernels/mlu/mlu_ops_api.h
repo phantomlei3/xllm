@@ -144,6 +144,15 @@ void batch_decode(const torch::Tensor& query,
                   bool return_lse,
                   int64_t kv_cache_quant_bit_size);
 
+void update_out_and_lse(
+    torch::Tensor& out,
+    torch::Tensor& lse,
+    const torch::Tensor& block_out,
+    const torch::Tensor& block_lse,
+    const std::optional<torch::Tensor>& seq_offsets = std::nullopt,
+    const std::optional<torch::Tensor>& cu_seqs = std::nullopt,
+    const std::optional<torch::Tensor>& block_cu_seqs = std::nullopt);
+
 void masked_indexer_select_paged_kv(
     const torch::Tensor& query,
     const torch::Tensor& k_cache,
