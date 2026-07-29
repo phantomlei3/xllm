@@ -17,6 +17,29 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+void reshape_linear_cache(
+    const torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& context_lengths,
+    c10::SymInt max_context_len,
+    bool packed,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const std::optional<torch::Tensor>& cache_bs_id,
+    const std::optional<torch::Tensor>& cache_seqlen_offset) {
+  tmo::torch_api::reshape_linear_cache(key,
+                                       value,
+                                       key_cache,
+                                       value_cache,
+                                       context_lengths,
+                                       max_context_len,
+                                       packed,
+                                       context_seq_offset,
+                                       cache_bs_id,
+                                       cache_seqlen_offset);
+}
+
 void reshape_paged_cache(torch::Tensor& key,
                          const std::optional<torch::Tensor>& value,
                          torch::Tensor& k_cache,

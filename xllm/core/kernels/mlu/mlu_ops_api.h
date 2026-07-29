@@ -46,6 +46,18 @@ void active(const torch::Tensor& input,
             int64_t start_expert_id,
             int64_t expert_size);
 
+void reshape_linear_cache(
+    const torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& context_lengths,
+    c10::SymInt max_context_len,
+    bool packed,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const std::optional<torch::Tensor>& cache_bs_id,
+    const std::optional<torch::Tensor>& cache_seqlen_offset);
+
 void reshape_paged_cache(torch::Tensor& key,
                          const std::optional<torch::Tensor>& value,
                          torch::Tensor& k_cache,
