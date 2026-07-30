@@ -8,6 +8,9 @@ file(GLOB_RECURSE MLU_SOURCE_FILES
   "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
 )
 
+list(FILTER MLU_HEADER_FILES EXCLUDE REGEX "/tests/")
+list(FILTER MLU_SOURCE_FILES EXCLUDE REGEX "/tests/")
+
 cc_library(
   NAME
     mlu_kernels
@@ -21,3 +24,5 @@ cc_library(
     torch_mlu_ops
     Python::Python
 )
+
+add_subdirectory(tests)
