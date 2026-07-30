@@ -2376,7 +2376,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_work_before_execute(
 
   runtime_.worker.prepare_multi_modal_data(processed_inputs);
 
-#if defined(USE_NPU) || defined(USE_CUDA)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
   prepare_kv_caches_related_for_input(inputs, processed_inputs);
 #endif
 }
@@ -2535,6 +2535,26 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
               .slice(0, 0, batch_size);
       llm_rec_params.shared_k_caches.emplace_back(layer_shared_k_cache);
       llm_rec_params.shared_v_caches.emplace_back(layer_shared_v_cache);
+#elif defined(USE_MLU)
+      auto layer_full_k_cache = cached_full_k_caches_[layer_id];
+      auto layer_full_v_cache = cached_full_v_caches_[layer_id];
+
+      auto layer_unshared_k_cache =
+          layer_full_k_cache.slice(0, unshared_offset, full_kv_len)
+              .view({static_cast<int64_t>(max_seqs_per_batch_),
+                     static_cast<int64_t>(beam_width_),
+                     num_kv_heads,
+                     static_cast<int64_t>(max_decode_step),
+                     head_dim})
+              .slice(0, 0, batch_size);
+      auto layer_unshared_v_cache =
+          layer_full_v_cache.slice(0, unshared_offset, full_kv_len)
+              .view({static_cast<int64_t>(max_seqs_per_batch_),
+                     static_cast<int64_t>(beam_width_),
+                     num_kv_heads,
+                     static_cast<int64_t>(max_decode_step),
+                     head_dim})
+              .slice(0, 0, batch_size);
 #else
       auto layer_full_k_cache = cached_full_k_caches_[layer_id];
       auto layer_full_v_cache = cached_full_v_caches_[layer_id];
