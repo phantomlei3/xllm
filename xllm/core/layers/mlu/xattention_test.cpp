@@ -25,7 +25,9 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
+#include "common/global_flags.h"
 #include "kernels/mlu/mlu_ops_api.h"
+#include "layers/mlu/attention.h"
 
 namespace xllm::layer::test {
 namespace {
@@ -38,6 +40,25 @@ constexpr int64_t kBatchSize = 2;
 constexpr int64_t kBeamWidth = 2;
 constexpr int64_t kMaxDecodeSteps = 2;
 constexpr float kPoison = 7.0f;
+
+class ScopedRecFlags {
+ public:
+  ScopedRecFlags(int32_t max_decode_rounds, bool one_stage)
+      : old_max_decode_rounds_(FLAGS_max_decode_rounds),
+        old_one_stage_(FLAGS_enable_xattention_one_stage) {
+    FLAGS_max_decode_rounds = max_decode_rounds;
+    FLAGS_enable_xattention_one_stage = one_stage;
+  }
+
+  ~ScopedRecFlags() {
+    FLAGS_max_decode_rounds = old_max_decode_rounds_;
+    FLAGS_enable_xattention_one_stage = old_one_stage_;
+  }
+
+ private:
+  int32_t old_max_decode_rounds_;
+  bool old_one_stage_;
+};
 
 torch::TensorOptions cpu_float() {
   return torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
@@ -91,13 +112,14 @@ torch::Tensor packed_prefill_ref(const torch::Tensor& query,
   return torch::cat(outputs, 0);
 }
 
-struct ComponentFixture {
-  explicit ComponentFixture(int64_t beam_width = kBeamWidth,
-                            int64_t max_tokens = kMaxTokens,
-                            int64_t num_heads = kNumHeads,
-                            int64_t num_kv_heads = kNumKvHeads,
-                            int64_t head_dim = kHeadDim,
-                            int64_t max_decode_steps = kMaxDecodeSteps)
+template <typename AttentionType>
+struct XAttentionFixture {
+  explicit XAttentionFixture(int64_t beam_width = kBeamWidth,
+                             int64_t max_tokens = kMaxTokens,
+                             int64_t num_heads = kNumHeads,
+                             int64_t num_kv_heads = kNumKvHeads,
+                             int64_t head_dim = kHeadDim,
+                             int64_t max_decode_steps = kMaxDecodeSteps)
       : beam_width(beam_width),
         max_tokens(max_tokens),
         num_heads(num_heads),
@@ -111,7 +133,7 @@ struct ComponentFixture {
                   num_kv_heads,
                   /*sliding_window=*/-1) {}
 
-  void init(const std::vector<int64_t>& lens) {
+  void init(const std::vector<int64_t>& lens, bool with_decode_cache = true) {
     prompt_lens = lens;
     batch_size = static_cast<int64_t>(lens.size());
     total_beam = batch_size * beam_width;
@@ -129,28 +151,13 @@ struct ComponentFixture {
                         .device(torch::Device("mlu:0"));
     auto mlu_fp32 = mlu_bf16.dtype(torch::kFloat32);
     auto mlu_int = mlu_bf16.dtype(torch::kInt32);
-    const int64_t full_len = max_tokens + total_beam * max_decode_steps;
+    const int64_t full_len =
+        max_tokens + (with_decode_cache ? total_beam * max_decode_steps : 0);
     full_k = torch::full({full_len, num_kv_heads, head_dim}, kPoison, mlu_bf16);
     full_v = torch::full({full_len, num_kv_heads, head_dim}, kPoison, mlu_bf16);
-    unshared_k = full_k.slice(0, max_tokens, full_len)
-                     .view({batch_size,
-                            beam_width,
-                            num_kv_heads,
-                            max_decode_steps,
-                            head_dim});
-    unshared_v = full_v.slice(0, max_tokens, full_len)
-                     .view({batch_size,
-                            beam_width,
-                            num_kv_heads,
-                            max_decode_steps,
-                            head_dim});
-    ASSERT_TRUE(unshared_k.is_contiguous());
-    ASSERT_TRUE(unshared_v.is_contiguous());
 
     meta.full_k_cache = full_k;
     meta.full_v_cache = full_v;
-    meta.unshared_k_cache = unshared_k;
-    meta.unshared_v_cache = unshared_v;
     meta.q_cu_seq_lens =
         torch::tensor(cu_lens, cpu_int()).to(torch::Device("mlu:0"));
     meta.kv_cu_seq_lens = meta.q_cu_seq_lens;
@@ -161,19 +168,40 @@ struct ComponentFixture {
     meta.is_chunked_prefill = false;
     meta.is_dummy = false;
 
-    XAttentionTwoStageDecodeCache cache;
-    cache.shared_o = torch::empty({total_beam, num_heads, head_dim}, mlu_bf16);
-    cache.shared_lse = torch::empty({total_beam, num_heads, 1}, mlu_fp32);
-    cache.unshared_o =
-        torch::empty({total_beam, num_heads, head_dim}, mlu_bf16);
-    cache.unshared_lse = torch::empty({total_beam, num_heads, 1}, mlu_fp32);
-    cache.shared_lse_kernel = torch::empty({num_heads, total_beam}, mlu_fp32);
-    cache.q_cu_seq_lens_shared =
-        torch::arange(0, (batch_size + 1) * beam_width, beam_width, mlu_int);
-    cache.decode_slot_mapping = torch::empty({total_beam}, mlu_int);
-    cache.unshared_seq_lens = torch::empty({total_beam}, mlu_int);
-    meta.xattention_two_stage_decode_cache = std::move(cache);
-    meta.block_table = torch::arange(total_beam, mlu_int).view({total_beam, 1});
+    if (with_decode_cache) {
+      unshared_k = full_k.slice(0, max_tokens, full_len)
+                       .view({batch_size,
+                              beam_width,
+                              num_kv_heads,
+                              max_decode_steps,
+                              head_dim});
+      unshared_v = full_v.slice(0, max_tokens, full_len)
+                       .view({batch_size,
+                              beam_width,
+                              num_kv_heads,
+                              max_decode_steps,
+                              head_dim});
+      ASSERT_TRUE(unshared_k.is_contiguous());
+      ASSERT_TRUE(unshared_v.is_contiguous());
+      meta.unshared_k_cache = unshared_k;
+      meta.unshared_v_cache = unshared_v;
+
+      XAttentionTwoStageDecodeCache cache;
+      cache.shared_o =
+          torch::empty({total_beam, num_heads, head_dim}, mlu_bf16);
+      cache.shared_lse = torch::empty({total_beam, num_heads, 1}, mlu_fp32);
+      cache.unshared_o =
+          torch::empty({total_beam, num_heads, head_dim}, mlu_bf16);
+      cache.unshared_lse = torch::empty({total_beam, num_heads, 1}, mlu_fp32);
+      cache.shared_lse_kernel = torch::empty({num_heads, total_beam}, mlu_fp32);
+      cache.q_cu_seq_lens_shared =
+          torch::arange(0, (batch_size + 1) * beam_width, beam_width, mlu_int);
+      cache.decode_slot_mapping = torch::empty({total_beam}, mlu_int);
+      cache.unshared_seq_lens = torch::empty({total_beam}, mlu_int);
+      meta.xattention_two_stage_decode_cache = std::move(cache);
+      meta.block_table =
+          torch::arange(total_beam, mlu_int).view({total_beam, 1});
+    }
   }
 
   torch::Tensor run_prefill(torch::Tensor& query,
@@ -210,7 +238,7 @@ struct ComponentFixture {
   int64_t max_prompt = 0;
   float scale;
   std::vector<int64_t> prompt_lens;
-  MluXAttentionImpl attention;
+  AttentionType attention;
   AttentionMetadata meta;
   KVCache dummy_cache;
   torch::Tensor full_k;
@@ -218,6 +246,9 @@ struct ComponentFixture {
   torch::Tensor unshared_k;
   torch::Tensor unshared_v;
 };
+
+using ComponentFixture = XAttentionFixture<MluXAttentionImpl>;
+using WrapperFixture = XAttentionFixture<AttentionImpl>;
 
 TEST(MluXAttentionKernelTest, PackedFlashReturnsKernelLseLayout) {
   constexpr int64_t total_beam = 4;
@@ -457,6 +488,162 @@ TEST(MluXAttentionComponentTest, DecodeTwoStagesMatchFullAttentionAtBothSteps) {
     EXPECT_TRUE(torch::isfinite(cache.shared_lse).all().item<bool>());
     EXPECT_TRUE(torch::isfinite(cache.unshared_lse).all().item<bool>());
   }
+}
+
+TEST(MluAttentionDispatchTest, PrefillUsesXAttentionWithoutDecodeMetadata) {
+  ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+  torch::manual_seed(20260729);
+  WrapperFixture fixture;
+  fixture.init({5, 8}, /*with_decode_cache=*/false);
+  auto query_cpu = torch::randn({13, kNumHeads, kHeadDim}, cpu_float()) * 0.1;
+  auto key_cpu = torch::randn({13, kNumKvHeads, kHeadDim}, cpu_float()) * 0.1;
+  auto value_cpu = torch::randn({13, kNumKvHeads, kHeadDim}, cpu_float()) * 0.1;
+  auto query = to_mlu(query_cpu);
+  auto key = to_mlu(key_cpu);
+  auto value = to_mlu(value_cpu);
+
+  auto actual = fixture.run_prefill(query, key, value);
+  auto reference =
+      packed_prefill_ref(query_cpu, key_cpu, value_cpu, {5, 8}, fixture.scale)
+          .reshape({13, -1});
+
+  EXPECT_TRUE(
+      torch::allclose(actual.cpu().to(torch::kFloat32), reference, 2e-2, 2e-2));
+  EXPECT_TRUE(torch::equal(fixture.full_k.slice(0, 0, 13).cpu(), key.cpu()));
+  EXPECT_TRUE(torch::equal(fixture.full_v.slice(0, 0, 13).cpu(), value.cpu()));
+  EXPECT_TRUE(torch::all(fixture.full_k.slice(0, 13, kMaxTokens) == kPoison)
+                  .item<bool>());
+  EXPECT_TRUE(torch::all(fixture.full_v.slice(0, 13, kMaxTokens) == kPoison)
+                  .item<bool>());
+  EXPECT_FALSE(fixture.meta.xattention_two_stage_decode_cache.has_value());
+  EXPECT_FALSE(fixture.meta.unshared_k_cache.defined());
+  EXPECT_FALSE(fixture.meta.unshared_v_cache.defined());
+}
+
+TEST(MluAttentionDispatchTest, DecodeTwoStagesUseXAttentionAndCombinedCache) {
+  ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+  torch::manual_seed(20260729);
+  WrapperFixture fixture;
+  fixture.init({5, 8});
+  auto prompt_q = to_mlu(torch::randn({13, kNumHeads, kHeadDim}) * 0.1);
+  auto prompt_k_cpu =
+      torch::randn({13, kNumKvHeads, kHeadDim}, cpu_float()) * 0.1;
+  auto prompt_v_cpu =
+      torch::randn({13, kNumKvHeads, kHeadDim}, cpu_float()) * 0.1;
+  auto prompt_k = to_mlu(prompt_k_cpu);
+  auto prompt_v = to_mlu(prompt_v_cpu);
+  fixture.run_prefill(prompt_q, prompt_k, prompt_v);
+
+  std::vector<torch::Tensor> suffix_k;
+  std::vector<torch::Tensor> suffix_v;
+  for (int64_t step = 0; step < kMaxDecodeSteps; ++step) {
+    auto query_cpu =
+        torch::randn({fixture.total_beam, kNumHeads, kHeadDim}, cpu_float()) *
+        0.1;
+    auto key_cpu =
+        torch::randn({fixture.total_beam, kNumKvHeads, kHeadDim}, cpu_float()) *
+        0.1;
+    auto value_cpu =
+        torch::randn({fixture.total_beam, kNumKvHeads, kHeadDim}, cpu_float()) *
+        0.1;
+    suffix_k.push_back(key_cpu);
+    suffix_v.push_back(value_cpu);
+    auto query = to_mlu(query_cpu);
+    auto key = to_mlu(key_cpu);
+    auto value = to_mlu(value_cpu);
+
+    auto actual = fixture.run_decode(query, key, value, step)
+                      .cpu()
+                      .to(torch::kFloat32)
+                      .view({fixture.total_beam, kNumHeads, kHeadDim});
+    std::vector<torch::Tensor> refs;
+    int64_t prompt_offset = 0;
+    for (int64_t request = 0; request < kBatchSize; ++request) {
+      for (int64_t beam = 0; beam < kBeamWidth; ++beam) {
+        const int64_t row = request * kBeamWidth + beam;
+        std::vector<torch::Tensor> beam_k = {prompt_k_cpu.slice(
+            0, prompt_offset, prompt_offset + fixture.prompt_lens[request])};
+        std::vector<torch::Tensor> beam_v = {prompt_v_cpu.slice(
+            0, prompt_offset, prompt_offset + fixture.prompt_lens[request])};
+        for (int64_t suffix_step = 0; suffix_step <= step; ++suffix_step) {
+          beam_k.push_back(suffix_k[suffix_step].slice(0, row, row + 1));
+          beam_v.push_back(suffix_v[suffix_step].slice(0, row, row + 1));
+        }
+        refs.push_back(attention_ref(query_cpu.slice(0, row, row + 1),
+                                     torch::cat(beam_k, 0),
+                                     torch::cat(beam_v, 0),
+                                     fixture.scale,
+                                     /*causal=*/false));
+      }
+      prompt_offset += fixture.prompt_lens[request];
+    }
+    auto reference = torch::cat(refs, 0);
+    auto abs_diff = (actual - reference).abs();
+    EXPECT_TRUE(torch::allclose(actual, reference, 2e-2, 2e-2))
+        << "step=" << step << ", max_abs=" << abs_diff.max().item<float>()
+        << ", mean_abs=" << abs_diff.mean().item<float>() << ", fail_ratio="
+        << (abs_diff > (2e-2 + 2e-2 * reference.abs()))
+               .to(torch::kFloat32)
+               .mean()
+               .item<float>();
+
+    auto written_k = fixture.unshared_k.select(3, step).reshape(
+        {fixture.total_beam, kNumKvHeads, kHeadDim});
+    auto written_v = fixture.unshared_v.select(3, step).reshape(
+        {fixture.total_beam, kNumKvHeads, kHeadDim});
+    EXPECT_TRUE(torch::equal(written_k.cpu(), key.cpu()));
+    EXPECT_TRUE(torch::equal(written_v.cpu(), value.cpu()));
+    if (step == 0) {
+      EXPECT_TRUE(
+          torch::all(fixture.unshared_k.select(3, 1) == kPoison).item<bool>());
+      EXPECT_TRUE(
+          torch::all(fixture.unshared_v.select(3, 1) == kPoison).item<bool>());
+    }
+    const auto& cache = fixture.meta.xattention_two_stage_decode_cache.value();
+    EXPECT_TRUE(torch::isfinite(cache.shared_lse).all().item<bool>());
+    EXPECT_TRUE(torch::isfinite(cache.unshared_lse).all().item<bool>());
+  }
+}
+
+TEST(MluAttentionDispatchDeathTest, RejectsOneStageRecMode) {
+  EXPECT_DEATH(
+      {
+        ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/true);
+        AttentionImpl attention(kNumHeads,
+                                kHeadDim,
+                                1.0f / std::sqrt(static_cast<float>(kHeadDim)),
+                                kNumKvHeads,
+                                /*sliding_window=*/-1);
+      },
+      "MLU.*two-stage.*enable_xattention_one_stage");
+}
+
+TEST(MluAttentionDispatchDeathTest, RejectsExtendedConstructorInRecMode) {
+  EXPECT_DEATH(
+      {
+        ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+        AttentionImpl attention(kNumHeads,
+                                kHeadDim,
+                                kNumKvHeads,
+                                /*v_head_dim=*/kHeadDim,
+                                /*sliding_window=*/-1,
+                                1.0f / std::sqrt(static_cast<float>(kHeadDim)),
+                                /*use_fused_mla_qkv=*/false,
+                                /*enable_lighting_indexer=*/false,
+                                /*enable_mla=*/false);
+      },
+      "MLU REC xAttention.*(MLA|lighting indexer)");
+}
+
+TEST(MluAttentionDispatchTest, OneStageFlagDoesNotRejectNonRecMode) {
+  ScopedRecFlags flags(/*max_decode_rounds=*/0, /*one_stage=*/true);
+  EXPECT_NO_FATAL_FAILURE({
+    AttentionImpl attention(kNumHeads,
+                            kHeadDim,
+                            1.0f / std::sqrt(static_cast<float>(kHeadDim)),
+                            kNumKvHeads,
+                            /*sliding_window=*/-1);
+  });
 }
 
 TEST(MluXAttentionComponentTest, TargetShapeReusesCombinedCache32Times) {
