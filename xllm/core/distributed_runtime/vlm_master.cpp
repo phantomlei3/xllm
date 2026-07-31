@@ -80,14 +80,6 @@ EngineType resolve_vlm_engine_type(const Options& options) {
   CHECK(SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()))
       << "VLM MTP currently requires speculative_algorithm=MTP, got "
       << options.speculative_algorithm();
-  CHECK(!options.enable_prefix_cache())
-      << "VLM MTP currently requires enable_prefix_cache=false";
-  CHECK(!options.enable_graph())
-      << "VLM MTP currently requires enable_graph=false";
-  CHECK(!options.enable_chunked_prefill())
-      << "VLM MTP currently requires enable_chunked_prefill=false";
-  CHECK(!options.enable_schedule_overlap())
-      << "VLM MTP currently requires enable_schedule_overlap=false";
   CHECK_EQ(options.cp_size(), 1) << "VLM MTP currently requires cp_size=1";
   return EngineType::VLM_SSM;
 }
