@@ -26,8 +26,11 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
+#include "framework/model/model_input_params.h"
 #include "kernels/mlu/mlu_ops_api.h"
+#include "layers/common/attention_metadata_builder.h"
 #include "layers/mlu/attention.h"
+#include "runtime/rec_beam_utils.h"
 
 namespace xllm::layer::test {
 namespace {
@@ -249,6 +252,140 @@ struct XAttentionFixture {
 
 using ComponentFixture = XAttentionFixture<MluXAttentionImpl>;
 using WrapperFixture = XAttentionFixture<AttentionImpl>;
+
+ModelInputParams make_rec_params(const WrapperFixture& fixture,
+                                 BatchForwardType forward_type) {
+  auto mlu_int = torch::TensorOptions()
+                     .dtype(torch::kInt32)
+                     .device(torch::Device("mlu:0"));
+  auto mlu_fp32 = mlu_int.dtype(torch::kFloat32);
+  ModelInputParams params;
+  params.batch_forward_type = forward_type;
+  params.num_sequences =
+      forward_type.is_decode() ? fixture.total_beam : fixture.batch_size;
+  params.q_seq_lens = forward_type.is_decode()
+                          ? torch::arange(fixture.total_beam + 1, mlu_int)
+                          : fixture.meta.q_cu_seq_lens;
+  params.kv_seq_lens = fixture.meta.kv_cu_seq_lens;
+  params.q_max_seq_len = forward_type.is_decode() ? 1 : fixture.max_prompt;
+  params.kv_max_seq_len = fixture.max_prompt;
+  params.kv_seq_lens_vec = {0, 5, 13};
+  params.block_tables = fixture.meta.block_table;
+  params.new_cache_slots = torch::zeros(
+      {forward_type.is_decode() ? fixture.total_beam : fixture.total_prompt},
+      mlu_int);
+
+  auto& rec = params.mutable_llmrec_params();
+  rec.batch_size = fixture.batch_size;
+  rec.beam_width = fixture.beam_width;
+  rec.total_round = fixture.max_decode_steps + 1;
+  rec.current_round_tensor = torch::zeros({1}, mlu_int);
+  if (!forward_type.is_decode()) {
+    return params;
+  }
+
+  const auto& cache = fixture.meta.xattention_two_stage_decode_cache.value();
+  rec.two_stage_shared_lse = cache.shared_lse;
+  rec.two_stage_shared_o = cache.shared_o;
+  rec.two_stage_unshared_lse = cache.unshared_lse;
+  rec.two_stage_unshared_o = cache.unshared_o;
+  rec.two_stage_q_cu_seq_lens_shared = cache.q_cu_seq_lens_shared;
+  rec.two_stage_shared_lse_kernel = cache.shared_lse_kernel;
+  rec.two_stage_decode_slot_mapping = cache.decode_slot_mapping;
+  rec.two_stage_unshared_seq_lens = cache.unshared_seq_lens;
+  rec.unshared_k_caches = {fixture.unshared_k};
+  rec.unshared_v_caches = {fixture.unshared_v};
+  EXPECT_EQ(rec.two_stage_shared_lse_kernel.scalar_type(), torch::kFloat32);
+  EXPECT_EQ(rec.two_stage_shared_lse_kernel.options().device(),
+            mlu_fp32.device());
+  return params;
+}
+
+TEST(MluRecParamsTest, ToMovesAllMluTwoStageFields) {
+  LlmRecMultiRoundParams params;
+  auto fp32 = torch::TensorOptions().dtype(torch::kFloat32);
+  auto int32 = torch::TensorOptions().dtype(torch::kInt32);
+  params.two_stage_shared_lse_kernel = torch::zeros({4, 6}, fp32);
+  params.two_stage_decode_slot_mapping = torch::arange(6, int32);
+  params.two_stage_unshared_seq_lens = torch::ones({6}, int32);
+
+  auto moved = params.to(torch::Device("mlu:0"));
+  EXPECT_EQ(moved.two_stage_shared_lse_kernel.device().type(),
+            torch::DeviceType::PrivateUse1);
+  EXPECT_EQ(moved.two_stage_decode_slot_mapping.device().type(),
+            torch::DeviceType::PrivateUse1);
+  EXPECT_EQ(moved.two_stage_unshared_seq_lens.device().type(),
+            torch::DeviceType::PrivateUse1);
+  EXPECT_FALSE(moved.two_stage_qo_indptr_expanded.defined());
+}
+
+TEST(MluAttentionMetadataBuilderTest, PrefillOmitsTwoStageDecodeCache) {
+  ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+  WrapperFixture fixture;
+  fixture.init({5, 8});
+  auto params = make_rec_params(fixture, BatchForwardType::PREFILL);
+
+  auto metadata = AttentionMetadataBuilder::build(params);
+
+  EXPECT_FALSE(metadata.xattention_two_stage_decode_cache.has_value());
+  EXPECT_EQ(metadata.total_kv_len, 13);
+}
+
+TEST(MluAttentionMetadataBuilderTest, DecodeMapsCompleteCacheWithoutCopies) {
+  ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+  WrapperFixture fixture;
+  fixture.init({5, 8});
+  auto params = make_rec_params(fixture, BatchForwardType::DECODE);
+
+  auto metadata = AttentionMetadataBuilder::build(params);
+  ASSERT_TRUE(metadata.xattention_two_stage_decode_cache.has_value());
+  const auto& rec = *params.llmrec_params();
+  const auto& cache = metadata.xattention_two_stage_decode_cache.value();
+
+  EXPECT_EQ(cache.shared_lse.data_ptr(), rec.two_stage_shared_lse.data_ptr());
+  EXPECT_EQ(cache.shared_o.data_ptr(), rec.two_stage_shared_o.data_ptr());
+  EXPECT_EQ(cache.unshared_lse.data_ptr(),
+            rec.two_stage_unshared_lse.data_ptr());
+  EXPECT_EQ(cache.unshared_o.data_ptr(), rec.two_stage_unshared_o.data_ptr());
+  EXPECT_EQ(cache.q_cu_seq_lens_shared.data_ptr(),
+            rec.two_stage_q_cu_seq_lens_shared.data_ptr());
+  EXPECT_EQ(cache.shared_lse_kernel.data_ptr(),
+            rec.two_stage_shared_lse_kernel.data_ptr());
+  EXPECT_EQ(cache.decode_slot_mapping.data_ptr(),
+            rec.two_stage_decode_slot_mapping.data_ptr());
+  EXPECT_EQ(cache.unshared_seq_lens.data_ptr(),
+            rec.two_stage_unshared_seq_lens.data_ptr());
+  EXPECT_EQ(cache.cached_batch_size, kBatchSize);
+  EXPECT_EQ(cache.cached_beam_size, kBeamWidth);
+  EXPECT_EQ(cache.cached_max_decode_step, kMaxDecodeSteps);
+  EXPECT_EQ(metadata.total_kv_len, 13);
+}
+
+TEST(MluAttentionMetadataBuilderDeathTest, RejectsMissingDecodeField) {
+  EXPECT_DEATH(
+      {
+        ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+        WrapperFixture fixture;
+        fixture.init({5, 8});
+        auto params = make_rec_params(fixture, BatchForwardType::DECODE);
+        params.mutable_llmrec_params().two_stage_unshared_seq_lens =
+            torch::Tensor();
+        AttentionMetadataBuilder::build(params);
+      },
+      "two_stage_unshared_seq_lens");
+}
+
+TEST(MluAttentionMetadataBuilderDeathTest, RejectsMixedRecForward) {
+  EXPECT_DEATH(
+      {
+        ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
+        WrapperFixture fixture;
+        fixture.init({5, 8});
+        auto params = make_rec_params(fixture, BatchForwardType::MIXED);
+        AttentionMetadataBuilder::build(params);
+      },
+      "only supports PREFILL or DECODE");
+}
 
 TEST(MluXAttentionKernelTest, PackedFlashReturnsKernelLseLayout) {
   constexpr int64_t total_beam = 4;
@@ -520,7 +657,7 @@ TEST(MluAttentionDispatchTest, PrefillUsesXAttentionWithoutDecodeMetadata) {
   EXPECT_FALSE(fixture.meta.unshared_v_cache.defined());
 }
 
-TEST(MluAttentionDispatchTest, DecodeTwoStagesUseXAttentionAndCombinedCache) {
+TEST(MluAttentionDispatchTest, DecodeUsesBuilderAndCombinedCache) {
   ScopedRecFlags flags(/*max_decode_rounds=*/3, /*one_stage=*/false);
   torch::manual_seed(20260729);
   WrapperFixture fixture;
@@ -551,6 +688,20 @@ TEST(MluAttentionDispatchTest, DecodeTwoStagesUseXAttentionAndCombinedCache) {
     auto query = to_mlu(query_cpu);
     auto key = to_mlu(key_cpu);
     auto value = to_mlu(value_cpu);
+
+    auto params = make_rec_params(fixture, BatchForwardType::DECODE);
+    auto& rec = params.mutable_llmrec_params();
+    runtime::detail::update_mlu_two_stage(params.block_tables,
+                                          step,
+                                          fixture.max_decode_steps,
+                                          rec.two_stage_decode_slot_mapping,
+                                          rec.two_stage_unshared_seq_lens);
+    auto metadata = AttentionMetadataBuilder::build(params);
+    metadata.full_k_cache = fixture.full_k;
+    metadata.full_v_cache = fixture.full_v;
+    metadata.unshared_k_cache = fixture.unshared_k;
+    metadata.unshared_v_cache = fixture.unshared_v;
+    fixture.meta = std::move(metadata);
 
     auto actual = fixture.run_decode(query, key, value, step)
                       .cpu()

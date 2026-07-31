@@ -23,6 +23,44 @@ limitations under the License.
 
 namespace xllm::runtime::detail {
 
+inline void update_mlu_two_stage(const torch::Tensor& block_table,
+                                 int32_t decode_step,
+                                 int32_t max_decode_steps,
+                                 torch::Tensor& slot_mapping,
+                                 torch::Tensor& unshared_seq_lens) {
+  CHECK_GT(max_decode_steps, 0) << "max_decode_steps must be positive";
+  CHECK_GE(decode_step, 0) << "decode_step must be non-negative";
+  CHECK_LT(decode_step, max_decode_steps)
+      << "decode_step " << decode_step << " exceeds capacity "
+      << max_decode_steps;
+  CHECK_EQ(block_table.dim(), 2)
+      << "MLU block_table must have shape [total_beam, 1], got "
+      << block_table.sizes();
+  CHECK_EQ(block_table.size(1), 1)
+      << "MLU block_table must have shape [total_beam, 1], got "
+      << block_table.sizes();
+  CHECK_EQ(slot_mapping.dim(), 1) << "slot_mapping must be rank 1";
+  CHECK_EQ(unshared_seq_lens.dim(), 1) << "unshared_seq_lens must be rank 1";
+  CHECK_EQ(slot_mapping.numel(), block_table.size(0))
+      << "slot_mapping total_beam mismatch";
+  CHECK_EQ(unshared_seq_lens.numel(), block_table.size(0))
+      << "unshared_seq_lens total_beam mismatch";
+  CHECK_EQ(block_table.scalar_type(), torch::kInt32)
+      << "MLU block_table must be int32";
+  CHECK_EQ(slot_mapping.scalar_type(), torch::kInt32)
+      << "MLU slot_mapping must be int32";
+  CHECK_EQ(unshared_seq_lens.scalar_type(), torch::kInt32)
+      << "MLU unshared_seq_lens must be int32";
+  CHECK_EQ(slot_mapping.device(), block_table.device())
+      << "slot_mapping and block_table must be on the same device";
+  CHECK_EQ(unshared_seq_lens.device(), block_table.device())
+      << "unshared_seq_lens and block_table must be on the same device";
+
+  slot_mapping.copy_(block_table.view({-1}));
+  slot_mapping.mul_(max_decode_steps).add_(decode_step);
+  unshared_seq_lens.fill_(decode_step + 1);
+}
+
 inline void write_first_round_beam_outputs(
     const torch::Tensor& flat_top_tokens,
     const torch::Tensor& flat_top_logprobs,
