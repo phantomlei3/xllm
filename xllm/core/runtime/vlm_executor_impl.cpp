@@ -25,6 +25,15 @@ limitations under the License.
 #include "platform/platform.h"
 
 namespace xllm {
+namespace {
+
+void record_encoder_invocation(const MMBatchData& mm_data) {
+  if (!mm_data.data().empty()) {
+    COUNTER_INC(vlm_encoder_effective_invocations_total);
+  }
+}
+
+}  // namespace
 
 VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
                                  const ModelArgs& args,
@@ -70,6 +79,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   CHECK(input_gather.finish(mm_data));
   mm_data.to(device_);
 
+  record_encoder_invocation(mm_data);
   MMDict embedding = encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);

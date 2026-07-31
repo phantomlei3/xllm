@@ -418,8 +418,58 @@ Master::Master(const Options& options, EngineType type)
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill());
 
-    auto engine = std::make_unique<VLMEngine>(eng_options);
-    engine_ = std::move(engine);
+    engine_ = std::make_unique<VLMEngine>(eng_options);
+  } else if (type == EngineType::VLM_SSM) {
+    const std::string draft_model_path =
+        options_.draft_model_path().value_or("");
+    LOG(INFO) << "Using draft devices: " << DeviceNameUtils::to_string(devices);
+    runtime::Options spec_options;
+    spec_options.model_path(options_.model_path())
+        .draft_model_path(draft_model_path)
+        .devices(devices)
+        .draft_devices(devices)
+        .backend(options_.backend())
+        .block_size(options_.block_size())
+        .max_cache_size(options_.max_cache_size())
+        .max_memory_utilization(options_.max_memory_utilization())
+        .enable_prefix_cache(options_.enable_prefix_cache())
+        .max_encoder_cache_size(options_.max_encoder_cache_size())
+        .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
+        .num_speculative_tokens(options_.num_speculative_tokens())
+        .speculative_algorithm(options_.speculative_algorithm())
+        .task_type(options_.task_type())
+        .enable_mla(options_.enable_mla())
+        .enable_flashcomm1(options_.enable_flashcomm1())
+        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
+        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
+        .mmrs_comm_mode(options_.mmrs_comm_mode())
+        .npu_kernel_backend(options_.npu_kernel_backend())
+        .master_node_addr(options.master_node_addr())
+        .nnodes(options.nnodes())
+        .node_rank(options.node_rank())
+        .dp_size(options.dp_size())
+        .ep_size(options.ep_size())
+        .cp_size(options.cp_size())
+        .enable_chunked_prefill(options_.enable_chunked_prefill())
+        .max_tokens_per_batch(options_.max_tokens_per_batch())
+        .max_seqs_per_batch(options_.max_seqs_per_batch())
+        .max_tokens_per_chunk_for_prefill(
+            options_.max_tokens_per_chunk_for_prefill())
+        .enable_offline_inference(options_.enable_offline_inference())
+        .disable_log_stats(options_.disable_log_stats())
+        .spawn_worker_path(options_.spawn_worker_path())
+        .enable_shm(options_.enable_shm())
+        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
+        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
+        .is_local(options_.is_local())
+        .enable_schedule_overlap(options_.enable_schedule_overlap())
+        .enable_graph(options_.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options_.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options_.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode());
+    engine_ = std::make_unique<SpeculativeEngine>(spec_options);
   } else if (type == EngineType::SSM) {
     // create a speculative engine if draft model path is provided
     const std::string draft_model_path =

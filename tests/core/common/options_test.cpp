@@ -18,10 +18,12 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <type_traits>
 
 #include "c_api/default.h"
 #include "cc_api/types.h"
+#include "core/common/types.h"
 
 namespace xllm {
 namespace {
@@ -48,6 +50,15 @@ TEST(OptionsTest, ContextParallelAcceptsExplicitValuesAcrossPublicApis) {
   EXPECT_EQ(options.cp_size(), 4);
   EXPECT_EQ(cc_options.cp_size, 4);
   EXPECT_EQ(c_options.cp_size, 4U);
+}
+
+TEST(EngineTypeTest, VlmSsmPreservesVlmEngineTypeValues) {
+  EXPECT_EQ(static_cast<int8_t>(EngineType::VLM), 2);
+  EXPECT_EQ(static_cast<int8_t>(EngineType::DIT), 3);
+  EXPECT_EQ(static_cast<int8_t>(EngineType::REC), 4);
+  EXPECT_EQ(static_cast<int8_t>(EngineType::VLM_SSM), 5);
+  EXPECT_EQ(EngineType(std::string("vlm_ssm")), EngineType::VLM_SSM);
+  EXPECT_STREQ(EngineType(EngineType::VLM_SSM).to_string(), "VLM_SSM");
 }
 
 }  // namespace
