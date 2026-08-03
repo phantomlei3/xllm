@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -160,15 +161,30 @@ TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
   EXPECT_TRUE(torch::equal(state.score(), score));
 }
 
-// Host prefix-cache allocation registers page-aligned host memory with the NPU
-// via aclrtHostRegister, which requires a live device context. Set one up once.
+// Platform page-locked host allocation requires a live device context.
 class HostKVCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
+#if defined(USE_MLU)
+    if (Platform::device_count() < 1) {
+      GTEST_SKIP() << "MLU device is required for host KV cache tests.";
+    }
+#endif
     Device device(/*device_index=*/0);
     device.set_device();
     device.init_device_context();
+#if defined(USE_MLU)
+    context_tensor_ =
+        torch::zeros({1}, torch::TensorOptions().device(device.unwrap()));
+#endif
   }
+
+  torch::Tensor context_tensor_;
+};
+
+class HostKVCacheConfigTest : public ::testing::Test {
+ protected:
+  void SetUp() override { GTEST_FLAG_SET(death_test_style, "threadsafe"); }
 };
 
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
@@ -756,7 +772,7 @@ TEST(KVCacheTensorAllocatorTest,
 }
 #endif
 
-TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {
+TEST_F(HostKVCacheTest, HostKVCacheLayerFirstLayoutKeepsLayerBlocksContiguous) {
   constexpr int64_t kNumBlocks = 16;
   constexpr int64_t kBlockSize = 128;
   constexpr int64_t kHeadDim = 64;
@@ -779,26 +795,74 @@ TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {
       .dtype(torch::kFloat32)
       .num_layers(kLayerCount)
       .model_type("qwen")
-      .host_blocks_factor(kHostFactor);
+      .host_blocks_factor(kHostFactor)
+      .enable_host_layer_first_layout(true);
 
   KVCache host_cache(shape, options, BlockType::KV, kLayerCount);
 
   const BlockTypeTensorMap tensors =
       host_cache.get_block_type_tensors(BlockType::KV);
   ASSERT_TRUE(tensors.count(KVCacheTensorRole::KEY) > 0);
+  ASSERT_TRUE(tensors.count(KVCacheTensorRole::VALUE) > 0);
 
   const std::vector<int64_t> base_key_shape = shape.key_cache_shape();
   const torch::Tensor& host_key = tensors.at(KVCacheTensorRole::KEY);
+  const torch::Tensor& host_value = tensors.at(KVCacheTensorRole::VALUE);
   EXPECT_TRUE(host_key.is_contiguous());
+  EXPECT_TRUE(host_value.is_contiguous());
   EXPECT_EQ(host_key.device().type(), torch::kCPU);
-  // host shape == [scaled_blocks, layer_count, ...per_block_dims]
+  // host shape == [layer_count, scaled_blocks, ...per_block_dims]
   ASSERT_EQ(host_key.dim(), static_cast<int64_t>(base_key_shape.size()) + 1);
-  EXPECT_EQ(host_key.size(0),
+  EXPECT_EQ(host_key.size(0), kLayerCount);
+  EXPECT_EQ(host_key.size(1),
             scale_host_block_count(base_key_shape[0], kHostFactor));
-  EXPECT_EQ(host_key.size(1), kLayerCount);
   for (size_t i = 1; i < base_key_shape.size(); ++i) {
     EXPECT_EQ(host_key.size(static_cast<int64_t>(i) + 1), base_key_shape[i]);
   }
+  EXPECT_EQ(host_key.stride(1), host_key[0][0].numel());
+  const uintptr_t first_block_address =
+      reinterpret_cast<uintptr_t>(host_key[0][0].data_ptr());
+  const uintptr_t second_block_address =
+      reinterpret_cast<uintptr_t>(host_key[0][1].data_ptr());
+  EXPECT_EQ(second_block_address - first_block_address,
+            host_key[0][0].nbytes());
+  EXPECT_EQ(host_value.size(0), kLayerCount);
+  EXPECT_EQ(host_value.size(1),
+            scale_host_block_count(base_key_shape[0], kHostFactor));
+  EXPECT_EQ(host_value.stride(1), host_value[0][0].numel());
+}
+
+TEST_F(HostKVCacheTest, HostKVCacheBlockFirstLayoutRemainsAvailable) {
+  constexpr int64_t kNumBlocks = 4;
+  constexpr int64_t kBlockSize = 8;
+  constexpr int64_t kHeadDim = 16;
+  constexpr int64_t kLayerCount = 3;
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kNumBlocks).block_size(kBlockSize);
+
+  ModelArgs model_args;
+  model_args.model_type("qwen");
+  model_args.n_kv_heads(1);
+  model_args.head_dim(kHeadDim);
+  KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kFloat32)
+      .num_layers(kLayerCount)
+      .model_type("qwen")
+      .host_blocks_factor(/*host_blocks_factor=*/2.0)
+      .enable_host_layer_first_layout(false);
+
+  KVCache host_cache(shape, options, BlockType::KV, kLayerCount);
+  const torch::Tensor& host_key =
+      host_cache.get_block_type_tensors(BlockType::KV)
+          .at(KVCacheTensorRole::KEY);
+
+  EXPECT_EQ(host_key.size(0), kNumBlocks * 2);
+  EXPECT_EQ(host_key.size(1), kLayerCount);
+  EXPECT_GT(host_key.stride(0), host_key[0][0].numel());
 }
 
 TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
@@ -861,6 +925,33 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
   EXPECT_TRUE(c128_tensors.count(KVCacheTensorRole::INDEX) == 0);
   EXPECT_EQ(c128_tensors.at(KVCacheTensorRole::KEY).size(0),
             scale_host_block_count(kC128Count, kHostFactor));
+}
+
+TEST_F(HostKVCacheConfigTest, MluPlatformAdvertisesHostOffloadSupport) {
+#if defined(USE_MLU)
+  EXPECT_TRUE(Platform::supports_host_kv_offload());
+#else
+  GTEST_SKIP() << "MLU build is required for the host offload capability.";
+#endif
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsUnsupportedRuntimeDependencies) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_graph = true;
+  options.enable_xtensor = true;
+  options.kv_cache_dtype = "int8";
+  options.indexer_cache_dtype = "int8";
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("--enable_graph=false"), std::string::npos);
+  EXPECT_NE(error->find("--enable_xtensor=false"), std::string::npos);
+  EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
+  EXPECT_NE(error->find("--indexer_cache_dtype=auto"), std::string::npos);
 }
 
 }  // namespace xllm
