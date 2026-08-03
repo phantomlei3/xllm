@@ -3070,6 +3070,19 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
       round - 1,
       beam_width,
       num_layers);
+#elif defined(USE_MLU)
+  auto& llmrec_params = input.input_params.mutable_llmrec_params();
+  auto& unshared_k_caches = llmrec_params.unshared_k_caches;
+  auto& unshared_v_caches = llmrec_params.unshared_v_caches;
+  TORCH_CHECK(unshared_k_caches.size() == static_cast<size_t>(num_layers),
+              "MLU cache-select requires one K cache per model layer");
+  TORCH_CHECK(unshared_v_caches.size() == static_cast<size_t>(num_layers),
+              "MLU cache-select requires one V cache per model layer");
+  xllm::kernel::mlu::cache_select(beam_tensors.out_token_index,
+                                  unshared_k_caches,
+                                  unshared_v_caches,
+                                  round - 1,
+                                  beam_width);
 #endif
 }
 

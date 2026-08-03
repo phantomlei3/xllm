@@ -14,3 +14,16 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
+
+cc_test(
+  NAME
+    mlu_cache_select_test
+  SRCS
+    cache_select_test.cpp
+  DEPS
+    :mlu_kernels
+    torch
+    torch_mlu
+    cnrt
+    GTest::gtest_main
+)

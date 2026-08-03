@@ -39,6 +39,12 @@ void beam_search(torch::Tensor acc_logprob,
                  uint32_t num_return_sequences,
                  uint32_t current_step);
 
+void cache_select(const torch::Tensor& out_token_index,
+                  std::vector<torch::Tensor>& unshared_k_caches,
+                  std::vector<torch::Tensor>& unshared_v_caches,
+                  int64_t decode_step,
+                  int64_t beam_width);
+
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
                   const torch::Tensor& sin,
