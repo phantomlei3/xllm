@@ -19,6 +19,7 @@ cc_library(
     batch_memcpy.h
     layer_synchronizer.h
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.h>
+    $<$<BOOL:${USE_MLU}>:mlu/mlu_host_memory.h>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.h>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_layer_synchronizer.h>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_tensor_alloc.h>
@@ -38,6 +39,7 @@ cc_library(
     batch_memcpy.cpp
     layer_synchronizer.cpp
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.cpp>
+    $<$<BOOL:${USE_MLU}>:mlu/mlu_host_memory.cpp>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_profiler.cpp>
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>,$<BOOL:${USE_MUSA}>>:torch_profiler.cpp>

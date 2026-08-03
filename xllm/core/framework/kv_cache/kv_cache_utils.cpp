@@ -29,7 +29,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #if defined(USE_MLU)
-#include <cn_api.h>
+#include "platform/mlu/mlu_host_memory.h"
 #endif
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"
@@ -373,63 +373,7 @@ aclFormat get_npu_kv_cache_format(const std::string& model_type) {
 
 namespace {
 
-#if defined(USE_MLU)
-std::string cn_error_text(CNresult result) {
-  const char* text = nullptr;
-  const CNresult text_result = cnGetErrorString(result, &text);
-  if (text_result != CN_SUCCESS || text == nullptr) {
-    return "unknown CNDrv error";
-  }
-  return text;
-}
-
-void release_mlu_host_region(void*& base_ptr,
-                             size_t& total_bytes,
-                             CNcontext& owner_context) {
-  if (base_ptr == nullptr || total_bytes == 0) {
-    base_ptr = nullptr;
-    total_bytes = 0;
-    owner_context = nullptr;
-    return;
-  }
-
-  CNcontext previous_context = nullptr;
-  const CNresult get_result = cnCtxGetCurrent(&previous_context);
-  if (get_result != CN_SUCCESS) {
-    LOG(ERROR) << "cnCtxGetCurrent before cnFreeHost failed: result="
-               << static_cast<int32_t>(get_result)
-               << ", error=" << cn_error_text(get_result);
-  }
-
-  const CNresult set_result = cnCtxSetCurrent(owner_context);
-  if (set_result != CN_SUCCESS) {
-    LOG(ERROR) << "cnCtxSetCurrent before cnFreeHost failed: result="
-               << static_cast<int32_t>(set_result)
-               << ", error=" << cn_error_text(set_result);
-  } else {
-    const CNresult free_result = cnFreeHost(base_ptr);
-    if (free_result != CN_SUCCESS) {
-      LOG(ERROR) << "cnFreeHost failed: result="
-                 << static_cast<int32_t>(free_result)
-                 << ", error=" << cn_error_text(free_result)
-                 << ", bytes=" << total_bytes << ", ptr=" << base_ptr;
-    }
-  }
-
-  if (get_result == CN_SUCCESS) {
-    const CNresult restore_result = cnCtxSetCurrent(previous_context);
-    if (restore_result != CN_SUCCESS) {
-      LOG(ERROR) << "cnCtxSetCurrent restore failed: result="
-                 << static_cast<int32_t>(restore_result)
-                 << ", error=" << cn_error_text(restore_result);
-    }
-  }
-
-  base_ptr = nullptr;
-  total_bytes = 0;
-  owner_context = nullptr;
-}
-#else
+#if !defined(USE_MLU)
 void release_host_region(void*& base_ptr, size_t& total_bytes) {
   if (base_ptr == nullptr || total_bytes == 0) {
     base_ptr = nullptr;
@@ -448,10 +392,17 @@ void release_host_region(void*& base_ptr, size_t& total_bytes) {
 
 }  // namespace
 
+HostPageAlignedRegion::HostPageAlignedRegion() = default;
+
 HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
   if (bytes == 0) {
     return;
   }
+#if defined(USE_MLU)
+  mlu_region_ = std::make_unique<mlu::MLUHostMemoryRegion>(bytes);
+  base_ptr = mlu_region_->data();
+  total_bytes = mlu_region_->size();
+#else
   const int64_t system_page_size = sysconf(_SC_PAGESIZE);
   CHECK_GT(system_page_size, 0) << "Failed to query system page size.";
   const size_t page_size = static_cast<size_t>(system_page_size);
@@ -460,35 +411,6 @@ HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
       << ", page_size=" << page_size;
   total_bytes = ((bytes + page_size - 1) / page_size) * page_size;
 
-#if defined(USE_MLU)
-  CNresult result = cnCtxGetCurrent(&owner_context);
-  CHECK_EQ(result, CN_SUCCESS)
-      << "cnCtxGetCurrent before cnHostMemAlloc failed: result="
-      << static_cast<int32_t>(result) << ", error=" << cn_error_text(result)
-      << ", bytes=" << total_bytes;
-  CHECK(owner_context != nullptr)
-      << "cnHostMemAlloc requires a current MLU context, bytes=" << total_bytes;
-  result = cnHostMemAlloc(
-      &base_ptr, static_cast<uint64_t>(total_bytes), CN_MEMHOSTALLOC_PORTABLE);
-  CHECK_EQ(result, CN_SUCCESS)
-      << "cnHostMemAlloc failed: result=" << static_cast<int32_t>(result)
-      << ", error=" << cn_error_text(result) << ", bytes=" << total_bytes;
-  if (reinterpret_cast<uintptr_t>(base_ptr) % page_size != 0) {
-    void* unaligned_ptr = base_ptr;
-    const CNresult free_result = cnFreeHost(base_ptr);
-    base_ptr = nullptr;
-    total_bytes = 0;
-    owner_context = nullptr;
-    if (free_result != CN_SUCCESS) {
-      LOG(ERROR) << "cnFreeHost for unaligned allocation failed: result="
-                 << static_cast<int32_t>(free_result)
-                 << ", error=" << cn_error_text(free_result);
-    }
-    LOG(FATAL) << "cnHostMemAlloc returned an unaligned pointer: page_size="
-               << page_size << ", requested_bytes=" << bytes
-               << ", returned_ptr=" << unaligned_ptr;
-  }
-#else
   base_ptr = mmap(nullptr,
                   total_bytes,
                   PROT_READ | PROT_WRITE,
@@ -527,14 +449,11 @@ HostPageAlignedRegion::HostPageAlignedRegion(
       total_bytes(other.total_bytes)
 #if defined(USE_MLU)
       ,
-      owner_context(other.owner_context)
+      mlu_region_(std::move(other.mlu_region_))
 #endif
 {
   other.base_ptr = nullptr;
   other.total_bytes = 0;
-#if defined(USE_MLU)
-  other.owner_context = nullptr;
-#endif
 }
 
 HostPageAlignedRegion& HostPageAlignedRegion::operator=(
@@ -542,28 +461,20 @@ HostPageAlignedRegion& HostPageAlignedRegion::operator=(
   if (this == &other) {
     return *this;
   }
-#if defined(USE_MLU)
-  release_mlu_host_region(base_ptr, total_bytes, owner_context);
-#else
+#if !defined(USE_MLU)
   release_host_region(base_ptr, total_bytes);
+#else
+  mlu_region_ = std::move(other.mlu_region_);
 #endif
   base_ptr = other.base_ptr;
   total_bytes = other.total_bytes;
-#if defined(USE_MLU)
-  owner_context = other.owner_context;
-#endif
   other.base_ptr = nullptr;
   other.total_bytes = 0;
-#if defined(USE_MLU)
-  other.owner_context = nullptr;
-#endif
   return *this;
 }
 
 HostPageAlignedRegion::~HostPageAlignedRegion() {
-#if defined(USE_MLU)
-  release_mlu_host_region(base_ptr, total_bytes, owner_context);
-#else
+#if !defined(USE_MLU)
   release_host_region(base_ptr, total_bytes);
 #endif
 }
