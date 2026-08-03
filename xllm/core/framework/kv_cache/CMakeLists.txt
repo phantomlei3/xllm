@@ -21,7 +21,6 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :block_utils
-    :mlu_rdma_memory_plan
     :platform
     glog::glog
     proto::xllm_proto

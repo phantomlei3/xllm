@@ -31,9 +31,6 @@ limitations under the License.
 #include "kv_cache_estimation.h"
 #include "kv_cache_shape.h"
 #include "platform/device.h"
-#if defined(USE_MLU)
-#include "platform/mlu/mlu_tensor_alloc.h"
-#endif
 #include "platform/platform.h"
 #include "worker.pb.h"
 
@@ -733,43 +730,6 @@ TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
   EXPECT_FALSE(caches[3].get_indexer_cache_scale().has_value());
 }
 
-TEST(KVCacheTensorAllocatorTest,
-     MluMooncakePadsOnlyIndexScaleAndDoesNotOwnTensorLifetime) {
-  if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for allocator storage checks.";
-  }
-
-  Device device(/*device_index=*/0);
-  device.set_device();
-  const torch::Device torch_device = device.unwrap();
-  std::shared_ptr<KVCacheTensorAllocator> allocator =
-      mlu_mooncake_tensor_allocator();
-  std::weak_ptr<KVCacheTensorAllocator> allocator_lifetime = allocator;
-
-  torch::Tensor key = allocator->allocate(
-      KVCacheTensorRole::KEY, {2, 4}, torch::kBFloat16, torch_device);
-  torch::Tensor index_scale =
-      allocator->allocate(KVCacheTensorRole::INDEX_SCALE,
-                          {2, 96, 1},
-                          torch::kFloat32,
-                          torch_device);
-
-  EXPECT_EQ(key.storage().nbytes(), key.nbytes());
-  EXPECT_EQ(index_scale.sizes().vec(), (std::vector<int64_t>{2, 96, 1}));
-  EXPECT_EQ(index_scale.scalar_type(), torch::kFloat32);
-  EXPECT_EQ(index_scale.nbytes(), 2 * 96 * sizeof(float));
-  EXPECT_GE(index_scale.storage().nbytes(), index_scale.nbytes());
-  EXPECT_EQ(mlu::get_rdma_registerable_nbytes(index_scale),
-            index_scale.storage().nbytes());
-
-  allocator.reset();
-  EXPECT_TRUE(allocator_lifetime.expired());
-  key.fill_(1);
-  index_scale.fill_(2);
-  device.synchronize_default_stream();
-  EXPECT_TRUE(key.defined());
-  EXPECT_TRUE(index_scale.defined());
-}
 #endif
 
 TEST_F(HostKVCacheTest, HostKVCacheLayerFirstLayoutKeepsLayerBlocksContiguous) {

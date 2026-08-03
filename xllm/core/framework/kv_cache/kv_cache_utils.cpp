@@ -30,8 +30,6 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_shape.h"
 #if defined(USE_MLU)
 #include <cn_api.h>
-
-#include "platform/mlu/mlu_tensor_alloc.h"
 #endif
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"

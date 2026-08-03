@@ -475,13 +475,9 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   kv_cache_transfer_ = kv_cache_transfer;
 
-  std::shared_ptr<KVCacheTensorAllocator> tensor_allocator;
-#if defined(USE_MLU)
-  tensor_allocator = mlu_mooncake_tensor_allocator();
-#endif
   if (!allocate_kv_cache_storage(kv_cache_shape,
                                  /*use_huge_page_allocator=*/true,
-                                 std::move(tensor_allocator))) {
+                                 /*tensor_allocator=*/nullptr)) {
     return false;
   }
 

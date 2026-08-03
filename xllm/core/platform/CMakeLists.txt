@@ -1,16 +1,5 @@
 include(cc_library)
 
-cc_library(
-  NAME
-    mlu_rdma_memory_plan
-  HDRS
-    mlu/mlu_rdma_memory_plan.h
-  SRCS
-    mlu/mlu_rdma_memory_plan.cpp
-  DEPS
-    glog::glog
-)
-
 if(USE_NPU)
   add_subdirectory(npu)
 endif()
@@ -31,7 +20,6 @@ cc_library(
     layer_synchronizer.h
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.h>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.h>
-    $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.h>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_layer_synchronizer.h>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_tensor_alloc.h>
     $<$<BOOL:${USE_CUDA}>:cuda/cuda_utils.h>
@@ -51,7 +39,6 @@ cc_library(
     layer_synchronizer.cpp
     $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.cpp>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.cpp>
-    $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_profiler.cpp>
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>,$<BOOL:${USE_MUSA}>>:torch_profiler.cpp>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_layer_synchronizer.cpp>
@@ -59,7 +46,6 @@ cc_library(
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:numa_utils.cpp>
   DEPS
     :config
-    :mlu_rdma_memory_plan
     absl::strings
     torch
     glog::glog
