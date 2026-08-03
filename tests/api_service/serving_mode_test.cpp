@@ -22,8 +22,8 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-TEST(ServingModeTest, VlmSsmUsesVlmApiSurface) {
-  EXPECT_EQ(to_serving_mode(EngineType::VLM_SSM), ServingMode::VLM);
+TEST(ServingModeTest, VlmSpeculativeUsesVlmApiSurface) {
+  EXPECT_EQ(to_serving_mode(EngineType::VLM_SPECULATIVE), ServingMode::VLM);
 }
 
 }  // namespace

@@ -378,7 +378,7 @@ Master::Master(const Options& options, EngineType type)
   if (type == EngineType::VLM) {
     runtime::Options eng_options = make_runtime_options(options_, devices);
     engine_ = std::make_unique<VLMEngine>(eng_options);
-  } else if (type == EngineType::VLM_SSM) {
+  } else if (type == EngineType::VLM_SPECULATIVE) {
     LOG(INFO) << "Using draft devices: " << DeviceNameUtils::to_string(devices);
     runtime::Options spec_options =
         make_speculative_runtime_options(options_, devices, devices);

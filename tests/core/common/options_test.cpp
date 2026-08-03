@@ -52,13 +52,15 @@ TEST(OptionsTest, ContextParallelAcceptsExplicitValuesAcrossPublicApis) {
   EXPECT_EQ(c_options.cp_size, 4U);
 }
 
-TEST(EngineTypeTest, VlmSsmPreservesVlmEngineTypeValues) {
+TEST(EngineTypeTest, VlmSpeculativePreservesVlmEngineTypeValues) {
   EXPECT_EQ(static_cast<int8_t>(EngineType::VLM), 2);
   EXPECT_EQ(static_cast<int8_t>(EngineType::DIT), 3);
   EXPECT_EQ(static_cast<int8_t>(EngineType::REC), 4);
-  EXPECT_EQ(static_cast<int8_t>(EngineType::VLM_SSM), 5);
-  EXPECT_EQ(EngineType(std::string("vlm_ssm")), EngineType::VLM_SSM);
-  EXPECT_STREQ(EngineType(EngineType::VLM_SSM).to_string(), "VLM_SSM");
+  EXPECT_EQ(static_cast<int8_t>(EngineType::VLM_SPECULATIVE), 5);
+  EXPECT_EQ(EngineType(std::string("vlm_speculative")),
+            EngineType::VLM_SPECULATIVE);
+  EXPECT_STREQ(EngineType(EngineType::VLM_SPECULATIVE).to_string(),
+               "VLM_SPECULATIVE");
 }
 
 }  // namespace

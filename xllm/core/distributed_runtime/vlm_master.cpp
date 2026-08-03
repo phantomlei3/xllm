@@ -81,7 +81,7 @@ EngineType resolve_vlm_engine_type(const Options& options) {
       << "VLM MTP currently requires speculative_algorithm=MTP, got "
       << options.speculative_algorithm();
   CHECK_EQ(options.cp_size(), 1) << "VLM MTP currently requires cp_size=1";
-  return EngineType::VLM_SSM;
+  return EngineType::VLM_SPECULATIVE;
 }
 
 size_t vlm_request_capacity(size_t prompt_tokens,
@@ -106,11 +106,12 @@ VLMMaster::VLMMaster(const Options& options)
 
   model_args_ = engine_->model_args();
 
-  const int32_t speculative_reserve = engine_type_ == EngineType::VLM_SSM
-                                          ? options_.num_speculative_tokens()
-                                          : 0;
+  const int32_t speculative_reserve =
+      engine_type_ == EngineType::VLM_SPECULATIVE
+          ? options_.num_speculative_tokens()
+          : 0;
   const char* draft_backend =
-      engine_type_ == EngineType::VLM_SSM ? "llm" : "none";
+      engine_type_ == EngineType::VLM_SPECULATIVE ? "llm" : "none";
   LOG(INFO) << "VLM startup: service_mode=VLM, engine_type="
             << engine_type_.to_string()
             << ", target_backend=" << options_.backend()
@@ -406,9 +407,10 @@ std::shared_ptr<Request> VLMMaster::build_request(
 
   // prompt_tokens includes visual placeholder tokens expanded by the processor.
   // Reserve one bonus token and the speculative validation span.
-  const int32_t speculative_reserve = engine_type_ == EngineType::VLM_SSM
-                                          ? options_.num_speculative_tokens()
-                                          : 0;
+  const int32_t speculative_reserve =
+      engine_type_ == EngineType::VLM_SPECULATIVE
+          ? options_.num_speculative_tokens()
+          : 0;
   const size_t capacity = vlm_request_capacity(prompt_tokens.size(),
                                                static_cast<size_t>(max_tokens),
                                                speculative_reserve);
