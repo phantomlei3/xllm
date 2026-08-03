@@ -311,6 +311,66 @@ TEST_F(BeamSearchTest, CarriesStateAcrossRounds) {
   expect_result(last, last_expected);
 }
 
+TEST_F(BeamSearchTest, CarriesBusinessShapeAcrossThreeRounds) {
+  FlagGuard guard(true);
+  constexpr int64_t kBatchSize = 4;
+  constexpr int64_t kBeamWidth = 256;
+  constexpr int64_t kTotalRounds = 3;
+
+  State first(kBatchSize, kBeamWidth, kTotalRounds, /*step=*/0);
+  auto first_expected = first.reference();
+  first.run(kBeamWidth);
+  expect_result(first, first_expected);
+  EXPECT_EQ(first.out_sequence.sizes(),
+            torch::IntArrayRef({kBatchSize, kBeamWidth, kTotalRounds}));
+  EXPECT_EQ(first.out_scores.sizes(),
+            torch::IntArrayRef({kBatchSize * kBeamWidth, 1}));
+
+  State middle(kBatchSize, kBeamWidth, kTotalRounds, /*step=*/1);
+  middle.acc_cpu = first.out_scores.cpu();
+  middle.sequence_cpu = first.out_sequence.cpu();
+  middle.acc = first.out_scores;
+  middle.sequence = first.out_sequence;
+  auto middle_expected = middle.reference();
+  middle.run(kBeamWidth);
+  expect_result(middle, middle_expected);
+  EXPECT_EQ(middle.out_sequence.sizes(),
+            torch::IntArrayRef({kBatchSize, kBeamWidth, kTotalRounds}));
+  EXPECT_EQ(middle.out_scores.sizes(),
+            torch::IntArrayRef({kBatchSize * kBeamWidth, 1}));
+  auto middle_indices = middle.out_indices.cpu().view({kBatchSize, kBeamWidth});
+  EXPECT_TRUE(torch::equal(
+      torch::div(middle_indices, kBeamWidth, "floor"),
+      torch::div(middle_expected.indices.view({kBatchSize, kBeamWidth}),
+                 kBeamWidth,
+                 "floor")));
+  EXPECT_TRUE(
+      torch::all(middle_indices.slice(1, 1) >= middle_indices.slice(1, 0, -1))
+          .item<bool>());
+
+  State last(kBatchSize, kBeamWidth, kTotalRounds, /*step=*/2);
+  last.acc_cpu = middle.out_scores.cpu();
+  last.sequence_cpu = middle.out_sequence.cpu();
+  last.acc = middle.out_scores;
+  last.sequence = middle.out_sequence;
+  auto last_expected = last.reference();
+  last.run(kBeamWidth);
+  expect_result(last, last_expected);
+  auto last_indices = last.out_indices.cpu().view({kBatchSize, kBeamWidth});
+  EXPECT_TRUE(torch::equal(
+      torch::div(last_indices, kBeamWidth, "floor"),
+      torch::div(last_expected.indices.view({kBatchSize, kBeamWidth}),
+                 kBeamWidth,
+                 "floor")));
+  auto last_scores = last.out_scores.cpu().view({kBatchSize, kBeamWidth});
+  EXPECT_TRUE(torch::all(last_scores.slice(1, 0, -1) >= last_scores.slice(1, 1))
+                  .item<bool>());
+  EXPECT_EQ(last.out_sequence.sizes(),
+            torch::IntArrayRef({kBatchSize, kBeamWidth, kTotalRounds}));
+  EXPECT_EQ(last.out_scores.sizes(),
+            torch::IntArrayRef({kBatchSize * kBeamWidth, 1}));
+}
+
 TEST_F(BeamSearchTest, HandlesSingleBeam) {
   State state(/*batch=*/3, /*beam=*/1, /*rounds=*/2, /*step=*/1);
   auto expected = state.reference();

@@ -101,7 +101,7 @@ inline void write_first_round_beam_outputs(
       .copy_(flat_top_tokens.view({batch_size, beam_width}));
 }
 
-// Records per-beam incremental logprobs for one decode round into
+// Records the cumulative beam score snapshot for each output slot into
 // token_step_logprobs[batch, beam, round].
 inline void write_beam_round_step_logprobs(const torch::Tensor& out_log_probs,
                                            int32_t batch_size,

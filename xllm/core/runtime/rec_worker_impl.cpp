@@ -49,6 +49,9 @@ limitations under the License.
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "platform/npu/device_capture_lock.h"
 #endif
+#if defined(USE_MLU)
+#include "kernels/mlu/mlu_ops_api.h"
+#endif
 #include "common/version_singleton.h"
 #include "framework/model_loader.h"
 #include "framework/sampling/rec_constrained_decoding.h"
@@ -2707,6 +2710,16 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
   int32_t num_layers =
       static_cast<int32_t>(runtime_.context->get_model_args().n_layers());
 
+#if defined(USE_MLU)
+  const int32_t mlu_result_width =
+      mutable_input.decoder_sampling_params.num_return_sequences > 0
+          ? mutable_input.decoder_sampling_params.num_return_sequences
+          : beam_width;
+  CHECK_EQ(mlu_result_width, beam_width)
+      << "MLU fixed-width beam search requires num_return_sequences ("
+      << mlu_result_width << ") to equal beam_width (" << beam_width << ")";
+#endif
+
   CHECK_GT(runtime_.worker.kv_caches_.size(), 0)
       << "KV caches are not initialized.";
 
@@ -2903,6 +2916,19 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_beam_search(
                                   batch_size,
                                   requested_result_width,
                                   round);
+#elif defined(USE_MLU)
+  xllm::kernel::mlu::beam_search(beam_tensors.acc_logprob,
+                                 beam_tensors.sequence_group,
+                                 top_tokens,
+                                 top_logprobs,
+                                 beam_tensors.out_log_probs,
+                                 beam_tensors.out_token_ids,
+                                 beam_tensors.out_token_index,
+                                 beam_tensors.out_beam_count_prefix_sums,
+                                 beam_tensors.out_seqgroup,
+                                 batch_size,
+                                 requested_result_width,
+                                 round);
 #endif
   if (FLAGS_enable_output_sku_logprobs) {
     runtime::detail::write_beam_round_step_logprobs(
@@ -2923,6 +2949,9 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_final_beam_search(
     int32_t batch_size,
     int32_t beam_width,
     int32_t requested_result_width) {
+#if defined(USE_MLU)
+  LOG(FATAL) << "MLU fixed-width final beam search branch is unreachable.";
+#else
   OneRecBeamSearchOutputTensors final_tensors =
       prepare_onerec_beam_search_output_tensors(
           batch_size,
@@ -2991,6 +3020,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_final_beam_search(
 
   std::swap(beam_tensors.sequence_group, beam_tensors.out_seqgroup);
   std::swap(beam_tensors.acc_logprob, beam_tensors.out_log_probs);
+#endif
 }
 
 void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_cache_select(
