@@ -575,11 +575,6 @@ std::optional<std::string> validate_host_cache_options(
   return error.str();
 }
 
-void check_host_cache_options(const HostCacheValidationOptions& options) {
-  const std::optional<std::string> error = validate_host_cache_options(options);
-  CHECK(!error.has_value()) << error.value_or("");
-}
-
 std::vector<int64_t> build_host_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor) {

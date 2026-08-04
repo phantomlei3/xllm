@@ -534,7 +534,11 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .indexer_cache_dtype = kv_cache_config.indexer_cache_dtype(),
       .model_type = args_.model_type(),
   };
-  check_host_cache_options(host_cache_validation_options);
+  const std::optional<std::string> host_cache_error =
+      validate_host_cache_options(host_cache_validation_options);
+  if (host_cache_error.has_value()) {
+    LOG(FATAL) << *host_cache_error;
+  }
 
   // DECODE-side skips LINEAR prefix cache by role (see
   // composite_block_manager.cpp::leaf_participates_in_prefix_cache), so the

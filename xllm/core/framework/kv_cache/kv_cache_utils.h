@@ -203,9 +203,6 @@ int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
 std::optional<std::string> validate_host_cache_options(
     const HostCacheValidationOptions& options);
 
-// Fail fast on an unsupported host prefix-cache configuration.
-void check_host_cache_options(const HostCacheValidationOptions& options);
-
 // Build a host tensor shape from a per-layer device shape by scaling dim 0
 // (block count) by host_blocks_factor.
 std::vector<int64_t> build_host_tensor_shape(
