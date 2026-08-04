@@ -911,7 +911,7 @@ TEST_F(HostKVCacheConfigTest, RejectsUnsupportedRuntimeDependencies) {
   EXPECT_NE(error->find("--enable_graph=false"), std::string::npos);
   EXPECT_NE(error->find("--enable_xtensor=false"), std::string::npos);
   EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
-  EXPECT_NE(error->find("--indexer_cache_dtype=auto"), std::string::npos);
+  EXPECT_EQ(error->find("--indexer_cache_dtype=auto"), std::string::npos);
 }
 
 }  // namespace xllm

@@ -545,17 +545,12 @@ std::optional<std::string> validate_host_cache_options(
         "--enable_xtensor=false");
   }
 
-  // Quantized KV and indexer caches add scale tensors whose host offload and
-  // restore lifecycle is not supported consistently by the common path yet.
+  // Quantized KV caches add scale tensors whose host offload and restore
+  // lifecycle is not supported consistently by the common path yet.
   if (options.kv_cache_dtype != "auto") {
     violations.emplace_back(
         "quantized KV cache scales are not transferred to host memory; set "
         "--kv_cache_dtype=auto");
-  }
-  if (options.indexer_cache_dtype != "auto") {
-    violations.emplace_back(
-        "quantized indexer cache scales are not transferred to host memory; "
-        "set --indexer_cache_dtype=auto");
   }
   if (!options.has_key_cache_shape) {
     violations.emplace_back("KV cache has no key-cache tensor to offload");
