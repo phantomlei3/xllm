@@ -121,8 +121,6 @@ struct HostCacheValidationOptions {
   int64_t device_block_count = 0;
   bool supports_host_kv_offload = false;
   bool enable_prefix_cache = true;
-  bool enable_graph = false;
-  bool enable_xtensor = false;
   bool has_key_cache_shape = true;
   bool has_grouped_cache_layout = false;
   bool has_conv_cache_shape = false;

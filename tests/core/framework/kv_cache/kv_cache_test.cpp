@@ -895,23 +895,27 @@ TEST_F(HostKVCacheConfigTest, MluPlatformAdvertisesHostOffloadSupport) {
 #endif
 }
 
-TEST_F(HostKVCacheConfigTest, RejectsUnsupportedRuntimeDependencies) {
+TEST_F(HostKVCacheConfigTest, AcceptsQuantizedIndexerCache) {
   HostCacheValidationOptions options;
   options.host_blocks_factor = 2.0;
   options.device_block_count = 128;
   options.supports_host_kv_offload = true;
-  options.enable_graph = true;
-  options.enable_xtensor = true;
-  options.kv_cache_dtype = "int8";
   options.indexer_cache_dtype = "int8";
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.kv_cache_dtype = "int8";
 
   const std::optional<std::string> error = validate_host_cache_options(options);
 
   ASSERT_TRUE(error.has_value());
-  EXPECT_NE(error->find("--enable_graph=false"), std::string::npos);
-  EXPECT_NE(error->find("--enable_xtensor=false"), std::string::npos);
   EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
-  EXPECT_EQ(error->find("--indexer_cache_dtype=auto"), std::string::npos);
 }
 
 }  // namespace xllm

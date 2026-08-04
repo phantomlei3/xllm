@@ -532,19 +532,6 @@ std::optional<std::string> validate_host_cache_options(
         "prefix caching is disabled; set --enable_prefix_cache=true");
   }
 
-  // Host-cache copies use streams and synchronization outside graph capture;
-  // no backend currently guarantees that lifecycle during graph execution.
-  if (options.enable_graph) {
-    violations.emplace_back(
-        "graph execution cannot wait for asynchronous host cache restores; "
-        "set --enable_graph=false");
-  }
-  if (options.enable_xtensor) {
-    violations.emplace_back(
-        "XTensor is incompatible with host prefix-cache offload; set "
-        "--enable_xtensor=false");
-  }
-
   // Quantized KV caches add scale tensors whose host offload and restore
   // lifecycle is not supported consistently by the common path yet.
   if (options.kv_cache_dtype != "auto") {
