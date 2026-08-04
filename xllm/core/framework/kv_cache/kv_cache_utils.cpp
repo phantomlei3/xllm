@@ -21,11 +21,18 @@ limitations under the License.
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <sstream>
 
 #include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#if defined(USE_MLU)
+#include <cn_api.h>
+
+#include "platform/mlu/mlu_tensor_alloc.h"
+#endif
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"
 
@@ -366,12 +373,124 @@ aclFormat get_npu_kv_cache_format(const std::string& model_type) {
 }
 #endif
 
+namespace {
+
+#if defined(USE_MLU)
+std::string cn_error_text(CNresult result) {
+  const char* text = nullptr;
+  const CNresult text_result = cnGetErrorString(result, &text);
+  if (text_result != CN_SUCCESS || text == nullptr) {
+    return "unknown CNDrv error";
+  }
+  return text;
+}
+
+void release_mlu_host_region(void*& base_ptr,
+                             size_t& total_bytes,
+                             CNcontext& owner_context) {
+  if (base_ptr == nullptr || total_bytes == 0) {
+    base_ptr = nullptr;
+    total_bytes = 0;
+    owner_context = nullptr;
+    return;
+  }
+
+  CNcontext previous_context = nullptr;
+  const CNresult get_result = cnCtxGetCurrent(&previous_context);
+  if (get_result != CN_SUCCESS) {
+    LOG(ERROR) << "cnCtxGetCurrent before cnFreeHost failed: result="
+               << static_cast<int32_t>(get_result)
+               << ", error=" << cn_error_text(get_result);
+  }
+
+  const CNresult set_result = cnCtxSetCurrent(owner_context);
+  if (set_result != CN_SUCCESS) {
+    LOG(ERROR) << "cnCtxSetCurrent before cnFreeHost failed: result="
+               << static_cast<int32_t>(set_result)
+               << ", error=" << cn_error_text(set_result);
+  } else {
+    const CNresult free_result = cnFreeHost(base_ptr);
+    if (free_result != CN_SUCCESS) {
+      LOG(ERROR) << "cnFreeHost failed: result="
+                 << static_cast<int32_t>(free_result)
+                 << ", error=" << cn_error_text(free_result)
+                 << ", bytes=" << total_bytes << ", ptr=" << base_ptr;
+    }
+  }
+
+  if (get_result == CN_SUCCESS) {
+    const CNresult restore_result = cnCtxSetCurrent(previous_context);
+    if (restore_result != CN_SUCCESS) {
+      LOG(ERROR) << "cnCtxSetCurrent restore failed: result="
+                 << static_cast<int32_t>(restore_result)
+                 << ", error=" << cn_error_text(restore_result);
+    }
+  }
+
+  base_ptr = nullptr;
+  total_bytes = 0;
+  owner_context = nullptr;
+}
+#else
+void release_host_region(void*& base_ptr, size_t& total_bytes) {
+  if (base_ptr == nullptr || total_bytes == 0) {
+    base_ptr = nullptr;
+    total_bytes = 0;
+    return;
+  }
+#if defined(USE_NPU)
+  aclrtHostUnregister(base_ptr);
+#endif
+  munlock(base_ptr, total_bytes);
+  munmap(base_ptr, total_bytes);
+  base_ptr = nullptr;
+  total_bytes = 0;
+}
+#endif
+
+}  // namespace
+
 HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
   if (bytes == 0) {
     return;
   }
-  size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  const int64_t system_page_size = sysconf(_SC_PAGESIZE);
+  CHECK_GT(system_page_size, 0) << "Failed to query system page size.";
+  const size_t page_size = static_cast<size_t>(system_page_size);
+  CHECK_LE(bytes, std::numeric_limits<size_t>::max() - (page_size - 1))
+      << "Host region byte count overflows page rounding: bytes=" << bytes
+      << ", page_size=" << page_size;
   total_bytes = ((bytes + page_size - 1) / page_size) * page_size;
+
+#if defined(USE_MLU)
+  CNresult result = cnCtxGetCurrent(&owner_context);
+  CHECK_EQ(result, CN_SUCCESS)
+      << "cnCtxGetCurrent before cnHostMemAlloc failed: result="
+      << static_cast<int32_t>(result) << ", error=" << cn_error_text(result)
+      << ", bytes=" << total_bytes;
+  CHECK(owner_context != nullptr)
+      << "cnHostMemAlloc requires a current MLU context, bytes=" << total_bytes;
+  result = cnHostMemAlloc(
+      &base_ptr, static_cast<uint64_t>(total_bytes), CN_MEMHOSTALLOC_PORTABLE);
+  CHECK_EQ(result, CN_SUCCESS)
+      << "cnHostMemAlloc failed: result=" << static_cast<int32_t>(result)
+      << ", error=" << cn_error_text(result) << ", bytes=" << total_bytes;
+  if (reinterpret_cast<uintptr_t>(base_ptr) % page_size != 0) {
+    void* unaligned_ptr = base_ptr;
+    const CNresult free_result = cnFreeHost(base_ptr);
+    base_ptr = nullptr;
+    total_bytes = 0;
+    owner_context = nullptr;
+    if (free_result != CN_SUCCESS) {
+      LOG(ERROR) << "cnFreeHost for unaligned allocation failed: result="
+                 << static_cast<int32_t>(free_result)
+                 << ", error=" << cn_error_text(free_result);
+    }
+    LOG(FATAL) << "cnHostMemAlloc returned an unaligned pointer: page_size="
+               << page_size << ", requested_bytes=" << bytes
+               << ", returned_ptr=" << unaligned_ptr;
+  }
+#else
   base_ptr = mmap(nullptr,
                   total_bytes,
                   PROT_READ | PROT_WRITE,
@@ -401,56 +520,173 @@ HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
   }
   CHECK_EQ(ret, ACL_SUCCESS) << "aclrtHostRegister fail: " << ret;
 #endif
+#endif
 }
 
 HostPageAlignedRegion::HostPageAlignedRegion(
     HostPageAlignedRegion&& other) noexcept
-    : base_ptr(other.base_ptr), total_bytes(other.total_bytes) {
+    : base_ptr(other.base_ptr),
+      total_bytes(other.total_bytes)
+#if defined(USE_MLU)
+      ,
+      owner_context(other.owner_context)
+#endif
+{
   other.base_ptr = nullptr;
   other.total_bytes = 0;
-}
-
-namespace {
-
-void release_host_page_aligned_region(void*& base_ptr, size_t& total_bytes) {
-  if (base_ptr == nullptr || total_bytes == 0) {
-    base_ptr = nullptr;
-    total_bytes = 0;
-    return;
-  }
-#if defined(USE_NPU)
-  aclrtHostUnregister(base_ptr);
+#if defined(USE_MLU)
+  other.owner_context = nullptr;
 #endif
-  munlock(base_ptr, total_bytes);
-  munmap(base_ptr, total_bytes);
-  base_ptr = nullptr;
-  total_bytes = 0;
 }
-
-}  // namespace
 
 HostPageAlignedRegion& HostPageAlignedRegion::operator=(
     HostPageAlignedRegion&& other) noexcept {
   if (this == &other) {
     return *this;
   }
-  release_host_page_aligned_region(base_ptr, total_bytes);
+#if defined(USE_MLU)
+  release_mlu_host_region(base_ptr, total_bytes, owner_context);
+#else
+  release_host_region(base_ptr, total_bytes);
+#endif
   base_ptr = other.base_ptr;
   total_bytes = other.total_bytes;
+#if defined(USE_MLU)
+  owner_context = other.owner_context;
+#endif
   other.base_ptr = nullptr;
   other.total_bytes = 0;
+#if defined(USE_MLU)
+  other.owner_context = nullptr;
+#endif
   return *this;
 }
 
 HostPageAlignedRegion::~HostPageAlignedRegion() {
-  release_host_page_aligned_region(base_ptr, total_bytes);
+#if defined(USE_MLU)
+  release_mlu_host_region(base_ptr, total_bytes, owner_context);
+#else
+  release_host_region(base_ptr, total_bytes);
+#endif
 }
 
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor) {
   CHECK_GT(block_count, 0) << "block_count must be positive.";
+  CHECK(std::isfinite(host_blocks_factor))
+      << "host_blocks_factor must be finite.";
+  CHECK_GE(host_blocks_factor, 0.0)
+      << "host_blocks_factor must be non-negative.";
   const double factor = std::max(host_blocks_factor, 1.0);
+  const long double scaled_block_count =
+      static_cast<long double>(block_count) * static_cast<long double>(factor);
+  CHECK_LE(scaled_block_count,
+           static_cast<long double>(std::numeric_limits<int64_t>::max()))
+      << "scaled host block count exceeds the int64 limit.";
   return std::max<int64_t>(block_count,
-                           static_cast<int64_t>(block_count * factor));
+                           static_cast<int64_t>(scaled_block_count));
+}
+
+std::optional<std::string> validate_host_cache_options(
+    const HostCacheValidationOptions& options) {
+  if (!std::isfinite(options.host_blocks_factor) ||
+      options.host_blocks_factor < 0.0) {
+    std::ostringstream error;
+    error << "Invalid host prefix-cache offload configuration "
+          << "(host_blocks_factor=" << options.host_blocks_factor
+          << "): --host_blocks_factor must be finite and non-negative.";
+    return error.str();
+  }
+
+  if (options.host_blocks_factor <= 1.0) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string> violations;
+  violations.reserve(10);
+  const long double host_block_count =
+      static_cast<long double>(options.device_block_count) *
+      static_cast<long double>(options.host_blocks_factor);
+  if (options.device_block_count <= 0 ||
+      host_block_count >
+          static_cast<long double>(std::numeric_limits<uint32_t>::max())) {
+    violations.emplace_back(
+        "requested host block count exceeds the uint32 block-manager limit; "
+        "reduce --host_blocks_factor");
+  }
+  if (!options.supports_host_kv_offload) {
+    violations.emplace_back(
+        "the current platform has no host KV offload copy/synchronization "
+        "provider");
+  }
+  if (!options.enable_prefix_cache) {
+    violations.emplace_back(
+        "prefix caching is disabled; set --enable_prefix_cache=true");
+  }
+
+  // Host-cache copies use streams and synchronization outside graph capture;
+  // no backend currently guarantees that lifecycle during graph execution.
+  if (options.enable_graph) {
+    violations.emplace_back(
+        "graph execution cannot wait for asynchronous host cache restores; "
+        "set --enable_graph=false");
+  }
+  if (options.enable_xtensor) {
+    violations.emplace_back(
+        "XTensor is incompatible with host prefix-cache offload; set "
+        "--enable_xtensor=false");
+  }
+
+  // Quantized KV and indexer caches add scale tensors whose host offload and
+  // restore lifecycle is not supported consistently by the common path yet.
+  if (options.kv_cache_dtype != "auto") {
+    violations.emplace_back(
+        "quantized KV cache scales are not transferred to host memory; set "
+        "--kv_cache_dtype=auto");
+  }
+  if (options.indexer_cache_dtype != "auto") {
+    violations.emplace_back(
+        "quantized indexer cache scales are not transferred to host memory; "
+        "set --indexer_cache_dtype=auto");
+  }
+  if (!options.has_key_cache_shape) {
+    violations.emplace_back("KV cache has no key-cache tensor to offload");
+  }
+  if (options.has_grouped_cache_layout) {
+    std::ostringstream violation;
+    violation << "model \"" << options.model_type
+              << "\" uses a grouped cache layout (for example DeepSeek-V4 "
+                 "SWA/C4/C128) that host offload does not support";
+    violations.emplace_back(violation.str());
+  }
+  if (options.has_conv_cache_shape || options.has_ssm_cache_shape) {
+    std::ostringstream violation;
+    violation << "model \"" << options.model_type
+              << "\" uses linear-attention conv/SSM cache tensors that host "
+                 "offload does not restore";
+    violations.emplace_back(violation.str());
+  }
+
+  if (violations.empty()) {
+    return std::nullopt;
+  }
+
+  std::ostringstream error;
+  error << "Invalid host prefix-cache offload configuration "
+        << "(host_blocks_factor=" << options.host_blocks_factor << "): ";
+  for (size_t i = 0; i < violations.size(); ++i) {
+    if (i != 0) {
+      error << "; ";
+    }
+    error << violations[i];
+  }
+  error << ". Fix the listed settings or disable offload with "
+           "--host_blocks_factor=0.";
+  return error.str();
+}
+
+void check_host_cache_options(const HostCacheValidationOptions& options) {
+  const std::optional<std::string> error = validate_host_cache_options(options);
+  CHECK(!error.has_value()) << error.value_or("");
 }
 
 std::vector<int64_t> build_host_tensor_shape(
@@ -465,11 +701,18 @@ std::vector<int64_t> build_host_tensor_shape(
 std::vector<int64_t> build_host_group_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor,
-    int64_t layer_count) {
+    int64_t layer_count,
+    bool enable_layer_first_layout) {
   CHECK_GT(layer_count, 0) << "layer_count must be positive.";
   std::vector<int64_t> host_shape =
       build_host_tensor_shape(base_shape, host_blocks_factor);
-  host_shape.insert(host_shape.begin() + 1, layer_count);
+  if (enable_layer_first_layout) {
+    const int64_t host_block_count = host_shape.front();
+    host_shape.front() = layer_count;
+    host_shape.insert(host_shape.begin() + 1, host_block_count);
+  } else {
+    host_shape.insert(host_shape.begin() + 1, layer_count);
+  }
   return host_shape;
 }
 

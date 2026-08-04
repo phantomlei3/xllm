@@ -44,6 +44,10 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
+#if defined(USE_MLU)
+#include <cn_api.h>
+#endif
+
 namespace xllm {
 
 class KVCacheShape;
@@ -67,6 +71,8 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
+  // Host-only physical layout. Device KV caches remain block-first.
+  PROPERTY(bool, enable_host_layer_first_layout) = false;
   // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
@@ -109,6 +115,22 @@ struct LinearAttentionKVCacheTensors {
   torch::Tensor ssm_cache;
 };
 
+struct HostCacheValidationOptions {
+  double host_blocks_factor = 0.0;
+  int64_t device_block_count = 0;
+  bool supports_host_kv_offload = false;
+  bool enable_prefix_cache = true;
+  bool enable_graph = false;
+  bool enable_xtensor = false;
+  bool has_key_cache_shape = true;
+  bool has_grouped_cache_layout = false;
+  bool has_conv_cache_shape = false;
+  bool has_ssm_cache_shape = false;
+  std::string kv_cache_dtype = "auto";
+  std::string indexer_cache_dtype = "auto";
+  std::string model_type;
+};
+
 struct KVCacheTensor {
   KVCacheTensorRole role;
   torch::Tensor tensor;
@@ -121,6 +143,9 @@ using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;
 struct HostPageAlignedRegion {
   void* base_ptr = nullptr;
   size_t total_bytes = 0;
+#if defined(USE_MLU)
+  CNcontext owner_context = nullptr;
+#endif
 
   HostPageAlignedRegion() = default;
   explicit HostPageAlignedRegion(size_t bytes);
@@ -174,18 +199,30 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 // (clamped to >= 1.0 so the host pool is never smaller than the device pool).
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
 
+// Return an actionable error for an unsupported host prefix-cache
+// configuration, or std::nullopt when the configuration is valid.
+std::optional<std::string> validate_host_cache_options(
+    const HostCacheValidationOptions& options);
+
+// Fail fast on an unsupported host prefix-cache configuration.
+void check_host_cache_options(const HostCacheValidationOptions& options);
+
 // Build a host tensor shape from a per-layer device shape by scaling dim 0
 // (block count) by host_blocks_factor.
 std::vector<int64_t> build_host_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor);
 
-// Build a grouped host tensor shape: scales dim 0 then inserts a layer
-// dimension at index 1, yielding [host_blocks, layer_count, ...per_block_dims].
+// Build a grouped host tensor shape. The legacy layout inserts the layer
+// dimension at index 1 and yields
+// [host_blocks, layer_count, ...per_block_dims]. The layer-first layout yields
+// [layer_count, host_blocks, ...per_block_dims], keeping all blocks of one
+// layer in a continuous extent.
 std::vector<int64_t> build_host_group_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor,
-    int64_t layer_count);
+    int64_t layer_count,
+    bool enable_layer_first_layout = false);
 
 // Allocate a page-aligned, mlock'd (and NPU-registered) host tensor over a
 // HostPageAlignedRegion. The region owns the memory; the tensor is a view.
