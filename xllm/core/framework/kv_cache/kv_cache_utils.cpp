@@ -592,18 +592,11 @@ std::vector<int64_t> build_host_tensor_shape(
 std::vector<int64_t> build_host_group_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor,
-    int64_t layer_count,
-    bool enable_layer_first_layout) {
+    int64_t layer_count) {
   CHECK_GT(layer_count, 0) << "layer_count must be positive.";
   std::vector<int64_t> host_shape =
       build_host_tensor_shape(base_shape, host_blocks_factor);
-  if (enable_layer_first_layout) {
-    const int64_t host_block_count = host_shape.front();
-    host_shape.front() = layer_count;
-    host_shape.insert(host_shape.begin() + 1, host_block_count);
-  } else {
-    host_shape.insert(host_shape.begin() + 1, layer_count);
-  }
+  host_shape.insert(host_shape.begin() + 1, layer_count);
   return host_shape;
 }
 

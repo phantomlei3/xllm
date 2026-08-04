@@ -72,8 +72,6 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
-  // Host-only physical layout. Device KV caches remain block-first.
-  PROPERTY(bool, enable_host_layer_first_layout) = false;
   // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
@@ -214,16 +212,12 @@ std::vector<int64_t> build_host_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor);
 
-// Build a grouped host tensor shape. The legacy layout inserts the layer
-// dimension at index 1 and yields
-// [host_blocks, layer_count, ...per_block_dims]. The layer-first layout yields
-// [layer_count, host_blocks, ...per_block_dims], keeping all blocks of one
-// layer in a continuous extent.
+// Build a grouped host tensor shape: scales dim 0 then inserts a layer
+// dimension at index 1, yielding [host_blocks, layer_count, ...per_block_dims].
 std::vector<int64_t> build_host_group_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor,
-    int64_t layer_count,
-    bool enable_layer_first_layout = false);
+    int64_t layer_count);
 
 // Allocate a page-aligned, mlock'd (and NPU-registered) host tensor over a
 // HostPageAlignedRegion. The region owns the memory; the tensor is a view.

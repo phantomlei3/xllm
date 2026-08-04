@@ -59,24 +59,22 @@ KVCacheImpl::KVCacheImpl(const KVCacheShape& kv_cache_shape,
       << "Base KVCacheImpl host cache only supports BlockType::KV.";
   host_page_aligned_regions_.reserve(2);
   if (kv_cache_shape.has_key_cache_shape()) {
-    create_host_tensor(build_host_group_tensor_shape(
-                           kv_cache_shape.key_cache_shape(),
-                           create_options.host_blocks_factor(),
-                           layer_count,
-                           create_options.enable_host_layer_first_layout()),
-                       create_options.dtype(),
-                       &key_cache_,
-                       &key_cache_shape_);
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.key_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.dtype(),
+        &key_cache_,
+        &key_cache_shape_);
   }
   if (kv_cache_shape.has_value_cache_shape()) {
-    create_host_tensor(build_host_group_tensor_shape(
-                           kv_cache_shape.value_cache_shape(),
-                           create_options.host_blocks_factor(),
-                           layer_count,
-                           create_options.enable_host_layer_first_layout()),
-                       create_options.dtype(),
-                       &value_cache_,
-                       &value_cache_shape_);
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.value_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.dtype(),
+        &value_cache_,
+        &value_cache_shape_);
   }
 }
 

@@ -48,24 +48,22 @@ LinearAttentionKVCacheImpl::LinearAttentionKVCacheImpl(
          "BlockType::LINEAR.";
   host_page_aligned_regions_.reserve(2);
   if (kv_cache_shape.has_conv_cache_shape()) {
-    create_host_tensor(build_host_group_tensor_shape(
-                           kv_cache_shape.conv_cache_shape(),
-                           create_options.host_blocks_factor(),
-                           layer_count,
-                           create_options.enable_host_layer_first_layout()),
-                       create_options.dtype(),
-                       &conv_cache_,
-                       &conv_cache_shape_);
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.conv_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.dtype(),
+        &conv_cache_,
+        &conv_cache_shape_);
   }
   if (kv_cache_shape.has_ssm_cache_shape()) {
-    create_host_tensor(build_host_group_tensor_shape(
-                           kv_cache_shape.ssm_cache_shape(),
-                           create_options.host_blocks_factor(),
-                           layer_count,
-                           create_options.enable_host_layer_first_layout()),
-                       create_options.ssm_dtype(),
-                       &ssm_cache_,
-                       &ssm_cache_shape_);
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.ssm_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.ssm_dtype(),
+        &ssm_cache_,
+        &ssm_cache_shape_);
   }
 }
 
