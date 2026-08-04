@@ -50,7 +50,7 @@ endif()
 if(USE_MLU)
 cc_test(
   NAME
-    hierarchy_kv_cache_transfer_test
+    quantized_indexer_host_offload_test
   SRCS
     hierarchy_kv_cache_transfer_test.cpp
   DEPS
