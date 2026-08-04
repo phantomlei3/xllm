@@ -325,7 +325,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
 
     void prepare_mlu_round_input(ForwardInput& input,
                                  int32_t round,
-                                 const torch::Tensor& top_tokens);
+                                 const torch::Tensor& prev_tokens);
 
     void prepare_two_stage_round_input(ForwardInput& input,
                                        int32_t round,

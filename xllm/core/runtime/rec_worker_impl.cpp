@@ -2360,6 +2360,9 @@ RecWorkerImpl::LlmRecMultiRoundPipeline::LlmRecMultiRoundPipeline(
          "enable_xattention_one_stage=false";
   CHECK_GE(get_rec_multi_round_decode_rounds(), 2)
       << "MLU REC multi-round pipeline requires max_decode_rounds >= 2";
+  CHECK_EQ(FLAGS_enable_graph, false)
+      << "MLU REC multi-round pipeline supports eager mode only; set "
+         "enable_graph=false";
 #endif
 
   full_kv_cache_offsets_ = std::make_unique<FullKvCacheOffsets>(this);
@@ -2715,9 +2718,11 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
       mutable_input.decoder_sampling_params.num_return_sequences > 0
           ? mutable_input.decoder_sampling_params.num_return_sequences
           : beam_width;
-  CHECK_EQ(mlu_result_width, beam_width)
+  CHECK(runtime::detail::has_mlu_fixed_result_width(
+      beam_width, mutable_input.decoder_sampling_params.num_return_sequences))
       << "MLU fixed-width beam search requires num_return_sequences ("
       << mlu_result_width << ") to equal beam_width (" << beam_width << ")";
+  runtime::detail::MluDecodeRoundState mlu_round_state;
 #endif
 
   CHECK_GT(runtime_.worker.kv_caches_.size(), 0)
@@ -2756,7 +2761,10 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
 #if defined(USE_NPU)
     prepare_round_input_for_npu(mutable_input, round, top_tokens, beam_tensors);
 #elif defined(USE_MLU)
-    prepare_mlu_round_input(mutable_input, round, top_tokens);
+    if (round > 0) {
+      mlu_round_state.require_prev_beam(round);
+    }
+    prepare_mlu_round_input(mutable_input, round, beam_tensors.out_token_ids);
 #else
     prepare_round_input_and_schedule_next(mutable_input,
                                           round,
@@ -2778,11 +2786,19 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
     }
     torch::Tensor hidden_states = model_output.hidden_states;
 
+    sample_output = SampleOutput{};
     if (sampling_params.selected_token_idxes.defined()) {
       logits = runtime_.model->logits(hidden_states,
                                       sampling_params.selected_token_idxes);
       sample_output = rec_sampler_->forward(logits, round_sampling_params);
     }
+
+#if defined(USE_MLU)
+    CHECK(sample_output.top_tokens.defined())
+        << "MLU REC sampler did not produce top_tokens for round " << round;
+    CHECK(sample_output.top_logprobs.defined())
+        << "MLU REC sampler did not produce top_logprobs for round " << round;
+#endif
 
     if (sample_output.top_tokens.defined() &&
         sample_output.top_logprobs.defined()) {
@@ -2802,9 +2818,20 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
       top_logprobs = sample_output.top_logprobs;
 #else
       const int64_t candidate_top_k = sample_output.top_tokens.size(-1);
+      CHECK_GT(candidate_top_k, 0) << "sampler top_tokens must have candidates";
       top_tokens = sample_output.top_tokens.to(torch::kInt32)
                        .reshape({-1, candidate_top_k});
       top_logprobs = sample_output.top_logprobs.reshape({-1, candidate_top_k});
+#endif
+#if defined(USE_MLU)
+      const int64_t expected_sampler_rows =
+          round == 0 ? batch_size
+                     : static_cast<int64_t>(batch_size) * beam_width;
+      CHECK_EQ(top_tokens.size(0), expected_sampler_rows)
+          << "MLU REC sampler top_tokens row count mismatch for round "
+          << round;
+      CHECK_EQ(top_logprobs.sizes(), top_tokens.sizes())
+          << "MLU REC sampler top_logprobs shape mismatch for round " << round;
 #endif
       if (final_round && requested_result_width != beam_width) {
         execute_final_beam_search(top_tokens,
@@ -2824,7 +2851,14 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
                             total_rounds);
       }
 
-      if (round > 0 && round < total_rounds - 1) {
+#if defined(USE_MLU)
+      mlu_round_state.mark_beam_complete(round);
+      const bool should_reparent =
+          runtime::detail::should_reparent_mlu_cache(round, total_rounds);
+#else
+      const bool should_reparent = round > 0 && round < total_rounds - 1;
+#endif
+      if (should_reparent) {
         execute_cache_select(
             beam_tensors, mutable_input, round, beam_width, num_layers);
       }
@@ -3261,15 +3295,11 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_round_input_for_npu(
 void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_mlu_round_input(
     ForwardInput& input,
     int32_t round,
-    const torch::Tensor& top_tokens) {
+    const torch::Tensor& prev_tokens) {
 #if defined(USE_MLU)
   if (round == 0) {
     return;
   }
-  CHECK_EQ(round, 1)
-      << "MLU REC production Worker currently supports only the first decode "
-         "round; requested round "
-      << round;
 
   auto& params = input.input_params;
   auto& llm_rec_params = params.mutable_llmrec_params();
@@ -3302,14 +3332,9 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_mlu_round_input(
   CHECK_LE(total_beam, max_total_beam)
       << "MLU REC total_beam overflow: actual " << total_beam << ", capacity "
       << max_total_beam;
-  CHECK(top_tokens.defined())
-      << "MLU REC round 1 requires prefill sampler top_tokens";
-  CHECK_EQ(top_tokens.numel(), total_beam)
-      << "MLU REC top_tokens count mismatch: actual " << top_tokens.numel()
-      << ", expected " << total_beam;
-  CHECK_EQ(top_tokens.device(), runtime_.worker.device())
-      << "MLU REC top_tokens device mismatch: actual " << top_tokens.device()
-      << ", expected " << runtime_.worker.device();
+  CHECK_EQ(prev_tokens.device(), runtime_.worker.device())
+      << "MLU REC selected beam token device mismatch: actual "
+      << prev_tokens.device() << ", expected " << runtime_.worker.device();
   CHECK_EQ(llm_rec_params.decode_positions_tensor_list.size(),
            static_cast<size_t>(max_decode_steps))
       << "MLU REC decode position tensor count mismatch";
@@ -3332,7 +3357,8 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_mlu_round_input(
   CHECK_EQ(llm_rec_params.unshared_k_caches[0].size(3), max_decode_steps)
       << "MLU REC unshared cache decode capacity mismatch";
 
-  input.token_ids = top_tokens.reshape({-1});
+  input.token_ids =
+      runtime::detail::get_mlu_decode_tokens(prev_tokens, total_beam);
   input.positions = positions;
   params.batch_forward_type = BatchForwardType::DECODE;
   params.input_embedding = torch::Tensor();
@@ -3379,7 +3405,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_mlu_round_input(
 #else
   (void)input;
   (void)round;
-  (void)top_tokens;
+  (void)prev_tokens;
 #endif
 }
 
