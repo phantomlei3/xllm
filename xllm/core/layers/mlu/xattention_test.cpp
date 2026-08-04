@@ -541,6 +541,43 @@ TEST(MluXAttentionComponentTest, PrefillIsCausalAndWritesPackedSharedCache) {
   EXPECT_TRUE(torch::all(fixture.unshared_v == kPoison).item<bool>());
 }
 
+TEST(MluXAttentionComponentTest, PrefillAcceptsStridedQkvViews) {
+  torch::manual_seed(20260804);
+  ComponentFixture fixture;
+  fixture.init({5, 8});
+  constexpr int64_t total_heads = kNumHeads + 2 * kNumKvHeads;
+  auto qkv_cpu = torch::randn({13, total_heads * kHeadDim}, cpu_float()) * 0.1;
+  auto qkv = to_mlu(qkv_cpu);
+  auto query = qkv.slice(-1, 0, kNumHeads * kHeadDim);
+  auto key =
+      qkv.slice(-1, kNumHeads * kHeadDim, (kNumHeads + kNumKvHeads) * kHeadDim);
+  auto value = qkv.slice(
+      -1, (kNumHeads + kNumKvHeads) * kHeadDim, total_heads * kHeadDim);
+  ASSERT_FALSE(query.is_contiguous());
+  ASSERT_FALSE(key.is_contiguous());
+  ASSERT_FALSE(value.is_contiguous());
+
+  auto actual = fixture.run_prefill(query, key, value);
+  auto query_cpu = qkv_cpu.slice(-1, 0, kNumHeads * kHeadDim)
+                       .view({13, kNumHeads, kHeadDim});
+  auto key_cpu =
+      qkv_cpu
+          .slice(-1, kNumHeads * kHeadDim, (kNumHeads + kNumKvHeads) * kHeadDim)
+          .view({13, kNumKvHeads, kHeadDim});
+  auto value_cpu =
+      qkv_cpu
+          .slice(
+              -1, (kNumHeads + kNumKvHeads) * kHeadDim, total_heads * kHeadDim)
+          .view({13, kNumKvHeads, kHeadDim});
+  auto reference =
+      packed_prefill_ref(query_cpu, key_cpu, value_cpu, {5, 8}, fixture.scale)
+          .reshape({13, -1});
+
+  EXPECT_TRUE(torch::isfinite(actual).all().item<bool>());
+  EXPECT_TRUE(
+      torch::allclose(actual.cpu().to(torch::kFloat32), reference, 2e-2, 2e-2));
+}
+
 TEST(MluXAttentionComponentTest, DecodeTwoStagesMatchFullAttentionAtBothSteps) {
   torch::manual_seed(20260729);
   ComponentFixture fixture;

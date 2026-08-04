@@ -66,15 +66,18 @@ MluXAttentionImpl::forward(const AttentionMetadata& attn_metadata,
                            torch::Tensor& value,
                            KVCache& kv_cache) {
   static_cast<void>(kv_cache);
-  torch::Tensor output = torch::empty_like(query);
   std::optional<torch::Tensor> output_lse = std::nullopt;
   if (attn_metadata.max_seq_len == 0) {
-    return {output, output_lse};
+    return {torch::empty_like(query), output_lse};
   }
 
   CHECK(!attn_metadata.is_chunked_prefill)
       << "chunked prefill is not supported";
 
+  query = query.contiguous();
+  key = key.contiguous();
+  value = value.contiguous();
+  torch::Tensor output = torch::empty_like(query);
   query = query.view({-1, num_heads_, head_size_});
   key = key.view({-1, num_kv_heads_, head_size_});
   value = value.view({-1, num_kv_heads_, head_size_});
