@@ -27,6 +27,7 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include "common/device_monitor.h"
 #include "common/interruption_bus.h"

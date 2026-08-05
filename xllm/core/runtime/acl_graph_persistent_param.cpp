@@ -1294,6 +1294,10 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           params.parallel.has_initial_state;
       graph_params->parallel.has_initial_state.resize(
           static_cast<size_t>(padded_batch_size), 0);
+      graph_params->linear_state_validity_mask =
+          params.linear_state_validity_mask;
+      graph_params->linear_state_validity_mask.resize(
+          static_cast<size_t>(padded_batch_size), 0);
     }
 
     // Keep the capture contract aligned with replay: the expanded decoder does
@@ -1365,6 +1369,15 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         his.resize(static_cast<size_t>(actual_batch_size));
       }
       his.resize(static_cast<size_t>(padded_batch_size), 0);
+    }
+
+    if (!params.linear_state_validity_mask.empty()) {
+      auto& validity_mask = graph_params->linear_state_validity_mask;
+      validity_mask = params.linear_state_validity_mask;
+      if (validity_mask.size() > static_cast<size_t>(actual_batch_size)) {
+        validity_mask.resize(static_cast<size_t>(actual_batch_size));
+      }
+      validity_mask.resize(static_cast<size_t>(padded_batch_size), 0);
     }
 
     if (params.num_accepted_tokens.defined() &&
