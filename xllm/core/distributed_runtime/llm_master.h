@@ -55,7 +55,7 @@ class LLMMaster : public Master {
                       RequestParams sp,
                       std::optional<Call*> call,
                       OutputCallback callback,
-                      bool owns_request_slot);
+                      RateLimiter::AdmissionSlotPtr admission_slot);
 
   // chat
   void handle_request(std::vector<Message> messages,
@@ -69,7 +69,7 @@ class LLMMaster : public Master {
                       RequestParams sp,
                       std::optional<Call*> call,
                       OutputCallback callback,
-                      bool owns_request_slot);
+                      RateLimiter::AdmissionSlotPtr admission_slot);
 
   // batch completion
   void handle_batch_request(std::vector<std::string> prompts,
@@ -121,7 +121,7 @@ class LLMMaster : public Master {
       const RequestParams& sp,
       std::optional<Call*> call,
       OutputCallback callback,
-      std::function<void()> release_request_slot);
+      RateLimiter::AdmissionSlotPtr admission_slot);
 
   std::shared_ptr<Request> generate_request(
       const std::vector<Message>& messages,
@@ -129,7 +129,7 @@ class LLMMaster : public Master {
       const RequestParams& sp,
       std::optional<Call*> call,
       OutputCallback callback,
-      std::function<void()> release_request_slot);
+      RateLimiter::AdmissionSlotPtr admission_slot);
 
  private:
   XServiceClient* xservice_client_ = nullptr;

@@ -192,7 +192,9 @@ void CompletionServiceImpl::process_async_rpc_impl(
   };
 
   // Check if the request is being rate-limited.
-  if (unlikely(master_->get_rate_limiter()->is_limited())) {
+  RateLimiter::AdmissionSlotPtr admission_slot =
+      master_->get_rate_limiter()->try_acquire();
+  if (unlikely(admission_slot == nullptr)) {
     master_->handle_rpc_response(RequestOutput{
         Status{StatusCode::RESOURCE_EXHAUSTED,
                "The number of concurrent requests has reached the limit."},
@@ -205,7 +207,6 @@ void CompletionServiceImpl::process_async_rpc_impl(
   const auto& rpc_request = *request;
   const auto& model = rpc_request.model();
   if (unlikely(!models_.contains(model))) {
-    master_->get_rate_limiter()->decrease_one_request();
     CALLBACK_WITH_ERROR(StatusCode::UNKNOWN,
                         "Model not supported",
                         service_request_id,
@@ -230,7 +231,7 @@ void CompletionServiceImpl::process_async_rpc_impl(
                           std::move(request_params),
                           std::nullopt,
                           callback,
-                          /*owns_request_slot=*/true);
+                          std::move(admission_slot));
 }
 
 // complete_async for brpc

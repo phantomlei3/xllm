@@ -35,23 +35,31 @@ namespace xllm {
 
 namespace {
 
-void release_terminal_request_slots(
+bool is_terminal_output(const RequestOutput& output) {
+  const bool failed = output.status.has_value() && !output.status.value().ok();
+  return failed || output.finished || output.cancelled ||
+         output.finished_on_prefill_instance;
+}
+
+void release_admission_slot_if_terminal(const std::shared_ptr<Request>& request,
+                                        const RequestOutput& output) {
+  if (!is_terminal_output(output)) {
+    return;
+  }
+
+  const RateLimiter::AdmissionSlotPtr& admission_slot =
+      request->state().admission_slot;
+  if (admission_slot != nullptr) {
+    admission_slot->release_once();
+  }
+}
+
+void release_admission_slots_if_terminal(
     const std::vector<std::shared_ptr<Request>>& requests,
     const std::vector<RequestOutput>& outputs) {
   CHECK_EQ(requests.size(), outputs.size());
   for (size_t i = 0; i < requests.size(); ++i) {
-    const RequestOutput& output = outputs[i];
-    const bool failed =
-        output.status.has_value() && !output.status.value().ok();
-    if (!failed && !output.finished && !output.cancelled &&
-        !output.finished_on_prefill_instance) {
-      continue;
-    }
-    const std::function<void()>& release_slot =
-        requests[i]->state().release_request_slot;
-    if (release_slot) {
-      release_slot();
-    }
+    release_admission_slot_if_terminal(requests[i], outputs[i]);
   }
 }
 
@@ -97,6 +105,7 @@ void AsyncResponseProcessor::process_failed_request(
     output.service_request_id = request->service_request_id();
     output.target_xservice_addr = request->source_xservice_addr();
     output.status = status;
+    release_admission_slot_if_terminal(request, output);
     request->state().output_func(output);
   };
   if (request->state().response_thread_id < 0) {
@@ -139,6 +148,7 @@ void AsyncResponseProcessor::process_completed_request(
     if (!disable_log_stats_) {
       request->log_statistic(end_2_end_latency_seconds);
     }
+    release_admission_slot_if_terminal(request, req_output);
     request->state().output_func(req_output);
   };
   if (request->state().response_thread_id < 0) {
@@ -195,7 +205,7 @@ void AsyncResponseProcessor::batch_process_completed_requests(
        requests = std::move(requests),
        request_outputs = std::move(request_outputs)]() mutable {
         counter->wait();
-        release_terminal_request_slots(requests, request_outputs);
+        release_admission_slots_if_terminal(requests, request_outputs);
         auto& resp_callback = requests[0]->state().outputs_func;
         resp_callback(request_outputs);
       });
@@ -242,17 +252,23 @@ void AsyncResponseProcessor::process_stream_request(
   }
 
   if (!is_all_seqs_closed) {
+    const bool request_finished = request->finished();
+    const bool request_cancelled = request->cancelled();
     // output the delta text til the end of the sequence to the client
 
     auto runnable = [cancel_request = cancel_request_,
                      request,
                      this,
+                     request_finished,
+                     request_cancelled,
                      indexes = std::move(indexes),
                      num_tokens = std::move(num_tokens)]() {
       AUTO_COUNTER(responsing_latency_seconds_stream);
 
       RequestOutput req_output;
       req_output.request_id = request->request_id();
+      req_output.service_request_id = request->service_request_id();
+      req_output.target_xservice_addr = request->source_xservice_addr();
       for (size_t i = 0; i < indexes.size(); ++i) {
         const size_t index = indexes[i];
         const size_t size = num_tokens[i];
@@ -262,6 +278,9 @@ void AsyncResponseProcessor::process_stream_request(
           req_output.outputs.push_back(std::move(seq_output.value()));
         }
       }
+      req_output.finished = request_finished;
+      req_output.cancelled = request_cancelled;
+      release_admission_slot_if_terminal(request, req_output);
       if (!request->state().output_func(req_output)) {
         cancel_request(request);
       }
@@ -307,10 +326,14 @@ void AsyncResponseProcessor::batch_process_stream_requests(
       }
     }
 
+    const bool request_finished = request->finished();
+    const bool request_cancelled = request->cancelled();
     // output the delta text til the end of the sequence to the client
     auto runnable = [this,
                      counter,
                      request,
+                     request_finished,
+                     request_cancelled,
                      indexes = std::move(indexes),
                      num_tokens = std::move(num_tokens),
                      req_output = &request_outputs[i]]() mutable {
@@ -337,6 +360,8 @@ void AsyncResponseProcessor::batch_process_stream_requests(
           req_output->finished_on_prefill_instance = true;
         }
       }
+      req_output->finished = request_finished;
+      req_output->cancelled = request_cancelled;
       if (req_output->finished_on_prefill_instance) {
         VLOG(1) << "Prefill response generation request_id="
                 << request->request_id() << ", response_thread_id="
@@ -363,7 +388,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
     auto& resp_callback = requests[0]->state().outputs_func;
     const absl::Time wait_start_time = absl::Now();
     counter->wait();
-    release_terminal_request_slots(requests, request_outputs);
+    release_admission_slots_if_terminal(requests, request_outputs);
     const double wait_ms =
         absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
     const absl::Time rpc_start_time = absl::Now();

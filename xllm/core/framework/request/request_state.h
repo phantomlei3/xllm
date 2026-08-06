@@ -25,6 +25,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/common/rate_limiter.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "rec_type.h"
@@ -148,10 +149,9 @@ struct RequestState final {
   // decode will send the batch outputs to prefill.
   OutputsFunc outputs_func;
 
-  // Releases the service-routing admission slot. The callable owns a shared
-  // once-token, so output_func and batched outputs can safely invoke it for
-  // the same request.
-  std::function<void()> release_request_slot;
+  // Owns service-routing request capacity until a terminal response releases
+  // it. Destruction is the fallback for early exits and dropped requests.
+  RateLimiter::AdmissionSlotPtr admission_slot;
 
   // decode address.
   std::string decode_address;

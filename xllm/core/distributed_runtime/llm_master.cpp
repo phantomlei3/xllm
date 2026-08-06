@@ -185,7 +185,7 @@ void LLMMaster::handle_request(std::string prompt,
                  std::move(sp),
                  call,
                  std::move(callback),
-                 /*owns_request_slot=*/false);
+                 /*admission_slot=*/nullptr);
 }
 
 void LLMMaster::handle_request(std::string prompt,
@@ -193,28 +193,8 @@ void LLMMaster::handle_request(std::string prompt,
                                RequestParams sp,
                                std::optional<Call*> call,
                                OutputCallback callback,
-                               bool owns_request_slot) {
-  std::function<void()> release_request_slot;
-  if (owns_request_slot) {
-    CHECK(options_.enable_service_routing());
-    auto slot_released = std::make_shared<std::atomic<bool>>(false);
-    release_request_slot = [rate_limiter = get_rate_limiter(),
-                            slot_released]() {
-      if (!slot_released->exchange(true, std::memory_order_acq_rel)) {
-        rate_limiter->decrease_one_request();
-      }
-    };
-    callback = [callback = std::move(callback),
-                release_request_slot](RequestOutput output) {
-      const bool failed =
-          output.status.has_value() && !output.status.value().ok();
-      if (failed || output.finished || output.cancelled ||
-          output.finished_on_prefill_instance) {
-        release_request_slot();
-      }
-      return callback(std::move(output));
-    };
-  }
+                               RateLimiter::AdmissionSlotPtr admission_slot) {
+  CHECK(admission_slot == nullptr || options_.enable_service_routing());
   scheduler_->incr_pending_requests(1);
   // add into the queue
   threadpool_->schedule([this,
@@ -222,7 +202,7 @@ void LLMMaster::handle_request(std::string prompt,
                          prompt_token = std::move(prompt_tokens),
                          sp = std::move(sp),
                          callback = std::move(callback),
-                         release_request_slot = std::move(release_request_slot),
+                         admission_slot = std::move(admission_slot),
                          call]() mutable {
     AUTO_COUNTER(request_handling_latency_seconds_completion);
 
@@ -240,7 +220,7 @@ void LLMMaster::handle_request(std::string prompt,
                                     sp,
                                     call,
                                     callback,
-                                    release_request_slot);
+                                    std::move(admission_slot));
     if (!request) {
       return;
     }
@@ -264,7 +244,7 @@ void LLMMaster::handle_request(std::vector<Message> messages,
                  std::move(sp),
                  call,
                  std::move(callback),
-                 /*owns_request_slot=*/false);
+                 /*admission_slot=*/nullptr);
 }
 
 void LLMMaster::handle_request(std::vector<Message> messages,
@@ -272,28 +252,8 @@ void LLMMaster::handle_request(std::vector<Message> messages,
                                RequestParams sp,
                                std::optional<Call*> call,
                                OutputCallback callback,
-                               bool owns_request_slot) {
-  std::function<void()> release_request_slot;
-  if (owns_request_slot) {
-    CHECK(options_.enable_service_routing());
-    auto slot_released = std::make_shared<std::atomic<bool>>(false);
-    release_request_slot = [rate_limiter = get_rate_limiter(),
-                            slot_released]() {
-      if (!slot_released->exchange(true, std::memory_order_acq_rel)) {
-        rate_limiter->decrease_one_request();
-      }
-    };
-    callback = [callback = std::move(callback),
-                release_request_slot](RequestOutput output) {
-      const bool failed =
-          output.status.has_value() && !output.status.value().ok();
-      if (failed || output.finished || output.cancelled ||
-          output.finished_on_prefill_instance) {
-        release_request_slot();
-      }
-      return callback(std::move(output));
-    };
-  }
+                               RateLimiter::AdmissionSlotPtr admission_slot) {
+  CHECK(admission_slot == nullptr || options_.enable_service_routing());
   scheduler_->incr_pending_requests(1);
   // add into the queue
   threadpool_->schedule([this,
@@ -301,7 +261,7 @@ void LLMMaster::handle_request(std::vector<Message> messages,
                          prompt_token = std::move(prompt_tokens),
                          sp = std::move(sp),
                          callback = std::move(callback),
-                         release_request_slot = std::move(release_request_slot),
+                         admission_slot = std::move(admission_slot),
                          call]() mutable {
     AUTO_COUNTER(request_handling_latency_seconds_chat);
 
@@ -318,7 +278,7 @@ void LLMMaster::handle_request(std::vector<Message> messages,
                                     sp,
                                     call,
                                     callback,
-                                    release_request_slot);
+                                    std::move(admission_slot));
     if (!request) {
       return;
     }
@@ -369,7 +329,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback,
-    std::function<void()> release_request_slot) {
+    RateLimiter::AdmissionSlotPtr admission_slot) {
   // A request is valid as long as it carries either text or pre-tokenized
   // prompt tokens; pure-token input (no text) is a first-class input.
   const bool has_prompt_tokens = prompt_tokens.has_value();
@@ -576,7 +536,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          call);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.sample_slots = sp.sample_slots;
-  req_state.release_request_slot = std::move(release_request_slot);
+  req_state.admission_slot = std::move(admission_slot);
 
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
@@ -595,7 +555,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback,
-    std::function<void()> release_request_slot) {
+    RateLimiter::AdmissionSlotPtr admission_slot) {
   Timer timer;
 
   std::optional<std::string> prompt;
@@ -616,7 +576,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                           sp,
                           call,
                           callback,
-                          std::move(release_request_slot));
+                          std::move(admission_slot));
 }
 
 bool LLMMaster::handle_rpc_response(const RequestOutput& output) {

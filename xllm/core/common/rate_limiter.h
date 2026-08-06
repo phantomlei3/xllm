@@ -18,17 +18,49 @@ limitations under the License.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace xllm {
 
 class RateLimiter final {
+  class SharedState;
+
  public:
   // Special value indicating sleep state.
   static constexpr int32_t kSleeping = INT32_MIN;
 
-  RateLimiter() = default;
+  class AdmissionSlot final {
+   public:
+    explicit AdmissionSlot(std::shared_ptr<SharedState> state);
+    ~AdmissionSlot();
 
-  ~RateLimiter() = default;
+    AdmissionSlot(const AdmissionSlot&) = delete;
+    AdmissionSlot& operator=(const AdmissionSlot&) = delete;
+    AdmissionSlot(AdmissionSlot&&) = delete;
+    AdmissionSlot& operator=(AdmissionSlot&&) = delete;
+
+    // Returns this slot's capacity at most once.
+    void release_once();
+
+   private:
+    std::shared_ptr<SharedState> state_;
+    std::atomic<bool> released_{false};
+  };
+
+  using AdmissionSlotPtr = std::shared_ptr<AdmissionSlot>;
+
+  RateLimiter();
+
+  ~RateLimiter();
+
+  RateLimiter(const RateLimiter&) = delete;
+  RateLimiter& operator=(const RateLimiter&) = delete;
+  RateLimiter(RateLimiter&&) = delete;
+  RateLimiter& operator=(RateLimiter&&) = delete;
+
+  // Atomically acquires request capacity. Returns nullptr if the concurrency
+  // limit has been reached or the service is sleeping.
+  [[nodiscard]] AdmissionSlotPtr try_acquire();
 
   // Returns true if request is rate-limited or sleeping.
   // If not limited and not sleeping, increments the counter.
@@ -40,9 +72,7 @@ class RateLimiter final {
   // Releases up to decrease_requests_num acquired slots without underflowing.
   void decrease_requests(size_t decrease_requests_num);
 
-  int32_t get_num_concurrent_requests() const {
-    return num_concurrent_requests_.load(std::memory_order_relaxed);
-  }
+  int32_t get_num_concurrent_requests() const;
 
   // CAS: only succeeds if num_concurrent_requests == 0.
   // Sets to kSleeping on success. Returns true on success.
@@ -52,13 +82,10 @@ class RateLimiter final {
   // Sets to 0 on success. Returns true on success.
   bool try_wakeup();
 
-  bool is_sleeping() const {
-    return num_concurrent_requests_.load(std::memory_order_relaxed) ==
-           kSleeping;
-  }
+  bool is_sleeping() const;
 
  private:
-  std::atomic<int32_t> num_concurrent_requests_{0};
+  std::shared_ptr<SharedState> state_;
 };
 
 }  // namespace xllm

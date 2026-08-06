@@ -7,8 +7,12 @@
 #include <limits>
 #include <optional>
 
+#include "core/common/rate_limiter.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
+#include "core/framework/request/request_params.h"
 #include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
@@ -90,6 +94,17 @@ class TestContinuousScheduler final : public ContinuousScheduler {
     response_processor_->batch_process_stream_requests(request_copy);
     response_processor_->wait_completion();
   }
+
+  void process_completed_request(const std::shared_ptr<Request>& request) {
+    response_processor_->process_completed_request(request);
+  }
+
+  void process_failed_request(const std::shared_ptr<Request>& request) {
+    response_processor_->process_failed_request(
+        request, {StatusCode::CANCELLED, "Request cancelled"});
+  }
+
+  void wait_for_responses() { response_processor_->wait_completion(); }
 };
 
 template <typename T>
@@ -619,7 +634,84 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
             initial_free_blocks);
 }
 
+TEST(ContinuousSchedulerTest, InvalidParamsReturnAdmissionSlotOnEarlyExit) {
+  ServiceConfig::get_instance().max_concurrent_requests(2);
+  RateLimiter rate_limiter;
+  RateLimiter::AdmissionSlotPtr occupied_slot = rate_limiter.try_acquire();
+  ASSERT_NE(occupied_slot, nullptr);
+
+  auto verify_params = [](RequestParams params,
+                          RateLimiter::AdmissionSlotPtr admission_slot) {
+    EXPECT_NE(admission_slot, nullptr);
+    params.n = 0;
+    return params.verify_params([](const RequestOutput&) { return true; });
+  };
+
+  RateLimiter::AdmissionSlotPtr admission_slot = rate_limiter.try_acquire();
+  ASSERT_NE(admission_slot, nullptr);
+  EXPECT_FALSE(verify_params(RequestParams{}, std::move(admission_slot)));
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+}
+
+TEST(ContinuousSchedulerTest, RejectedRequestDestructionReturnsAdmissionSlot) {
+  ServiceConfig::get_instance().max_concurrent_requests(2);
+  RateLimiter rate_limiter;
+  RateLimiter::AdmissionSlotPtr occupied_slot = rate_limiter.try_acquire();
+  ASSERT_NE(occupied_slot, nullptr);
+
+  ScopedConfigValue<int32_t> request_queue_size(
+      RecConfig::get_instance().request_queue_size(), 1);
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  std::shared_ptr<Request> accepted_request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  ASSERT_TRUE(scheduler->add_request(accepted_request));
+
+  std::shared_ptr<Request> rejected_request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  rejected_request->state().admission_slot = rate_limiter.try_acquire();
+  ASSERT_NE(rejected_request->state().admission_slot, nullptr);
+  ASSERT_FALSE(scheduler->add_request(rejected_request));
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 2);
+
+  rejected_request.reset();
+
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+}
+
+TEST(ContinuousSchedulerTest,
+     DuplicateTerminalResponsePathsReturnAdmissionSlotOnce) {
+  ServiceConfig::get_instance().max_concurrent_requests(2);
+  RateLimiter rate_limiter;
+  RateLimiter::AdmissionSlotPtr occupied_slot = rate_limiter.try_acquire();
+  ASSERT_NE(occupied_slot, nullptr);
+
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  std::shared_ptr<Request> request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().admission_slot = rate_limiter.try_acquire();
+  ASSERT_NE(request->state().admission_slot, nullptr);
+  request->state().output_func = [](const RequestOutput&) { return true; };
+  request->sequences()[0]->finish();
+
+  scheduler->process_completed_request(request);
+  scheduler->process_failed_request(request);
+  scheduler->wait_for_responses();
+
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+}
+
 TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
+  ServiceConfig::get_instance().max_concurrent_requests(3);
+  RateLimiter rate_limiter;
+  RateLimiter::AdmissionSlotPtr occupied_slot = rate_limiter.try_acquire();
+  ASSERT_NE(occupied_slot, nullptr);
+
   ContinuousScheduler::Options opt =
       create_scheduler_options(1024, 16, 0, 1024, 1);
   opt.enable_schedule_overlap() = false;
@@ -638,6 +730,8 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   for (std::shared_ptr<Request>& request : requests) {
     request->state().stream = true;
     request->state().output_func = [](const RequestOutput&) { return true; };
+    request->state().admission_slot = rate_limiter.try_acquire();
+    ASSERT_NE(request->state().admission_slot, nullptr);
     make_request_decode_ready(request);
     scheduler->add_request(request);
   }
@@ -654,6 +748,7 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   scheduler->reject_streams(requests);
   scheduler->reject_streams(requests);
 
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
   EXPECT_FALSE(requests[0]->cancelled());
   EXPECT_FALSE(requests[1]->cancelled());
 
@@ -786,12 +881,17 @@ TEST(ContinuousSchedulerTest, ResumeReschedulesPreemptedRequests) {
 // TEST: ABORT mode cancels running requests, frees KV cache, and does NOT
 // push them back to the waiting queue (clients must retry).
 TEST(ContinuousSchedulerTest, PauseAbortCancelsRunningRequests) {
+  ServiceConfig::get_instance().max_concurrent_requests(3);
+  RateLimiter rate_limiter;
+  RateLimiter::AdmissionSlotPtr occupied_slot = rate_limiter.try_acquire();
+  ASSERT_NE(occupied_slot, nullptr);
+
   int block_num = 33;
   int block_size = 32;
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   auto engine = std::make_unique<FakeEngine>(block_num, block_size);
-  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
   ASSERT_TRUE(scheduler != nullptr);
 
@@ -807,6 +907,8 @@ TEST(ContinuousSchedulerTest, PauseAbortCancelsRunningRequests) {
     // process_failed_request invokes the requests output callback; give it a
     // no-op so ABORT can notify completion without a real client.
     req->state().output_func = [](const RequestOutput&) { return true; };
+    req->state().admission_slot = rate_limiter.try_acquire();
+    ASSERT_NE(req->state().admission_slot, nullptr);
     scheduler->add_request(req);
   }
   auto batch = scheduler->prepare_batch_test();
@@ -818,11 +920,13 @@ TEST(ContinuousSchedulerTest, PauseAbortCancelsRunningRequests) {
   int free_blocks_before = util::max(block_manager_pool->num_free_blocks());
 
   scheduler->abort_all_running_requests_test();
+  scheduler->wait_for_responses();
 
   int free_blocks_after = util::max(block_manager_pool->num_free_blocks());
   EXPECT_GT(free_blocks_after, free_blocks_before);        // KV cache freed
   EXPECT_EQ(scheduler->get_running_requests().size(), 0);  // running cleared
   EXPECT_EQ(scheduler->get_waiting_requests_num(), 0);     // NOT requeued
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
 
   (void)engine.release();
 }
