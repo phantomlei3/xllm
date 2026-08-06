@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -146,6 +147,11 @@ struct RequestState final {
   // function to call when batch outputs is generated in disagg pd mode,
   // decode will send the batch outputs to prefill.
   OutputsFunc outputs_func;
+
+  // Releases the service-routing admission slot. The callable owns a shared
+  // once-token, so output_func and batched outputs can safely invoke it for
+  // the same request.
+  std::function<void()> release_request_slot;
 
   // decode address.
   std::string decode_address;

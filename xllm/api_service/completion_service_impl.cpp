@@ -188,31 +188,16 @@ void CompletionServiceImpl::process_async_rpc_impl(
   const auto& target_xservice_addr = request->source_xservice_addr();
   auto callback = [master = master_](const RequestOutput& req_output) -> bool {
     req_output.log_request_status();
-    if (req_output.status.has_value()) {
-      const auto& status = req_output.status.value();
-      if (!status.ok()) {
-        // Reduce the number of concurrent requests when a request is
-        // finished with error.
-        master->get_rate_limiter()->decrease_one_request();
-        return master->handle_rpc_response(req_output);
-      }
-    }
-    // Reduce the number of concurrent requests when a request is finished
-    // or canceled.
-    if (req_output.finished || req_output.cancelled ||
-        req_output.finished_on_prefill_instance) {
-      master->get_rate_limiter()->decrease_one_request();
-    }
     return master->handle_rpc_response(req_output);
   };
 
   // Check if the request is being rate-limited.
   if (unlikely(master_->get_rate_limiter()->is_limited())) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::RESOURCE_EXHAUSTED,
-        "The number of concurrent requests has reached the limit.",
+    master_->handle_rpc_response(RequestOutput{
+        Status{StatusCode::RESOURCE_EXHAUSTED,
+               "The number of concurrent requests has reached the limit."},
         service_request_id,
-        target_xservice_addr);
+        target_xservice_addr});
     return;
   }
 
@@ -220,6 +205,7 @@ void CompletionServiceImpl::process_async_rpc_impl(
   const auto& rpc_request = *request;
   const auto& model = rpc_request.model();
   if (unlikely(!models_.contains(model))) {
+    master_->get_rate_limiter()->decrease_one_request();
     CALLBACK_WITH_ERROR(StatusCode::UNKNOWN,
                         "Model not supported",
                         service_request_id,
@@ -243,7 +229,8 @@ void CompletionServiceImpl::process_async_rpc_impl(
                           std::move(prompt_tokens),
                           std::move(request_params),
                           std::nullopt,
-                          callback);
+                          callback,
+                          /*owns_request_slot=*/true);
 }
 
 // complete_async for brpc

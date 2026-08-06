@@ -19,6 +19,7 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <glog/logging.h>
 
+#include <functional>
 #include <memory>
 
 #include "common/global_flags.h"
@@ -31,6 +32,30 @@ limitations under the License.
 #include "util/env_var.h"
 
 namespace xllm {
+
+namespace {
+
+void release_terminal_request_slots(
+    const std::vector<std::shared_ptr<Request>>& requests,
+    const std::vector<RequestOutput>& outputs) {
+  CHECK_EQ(requests.size(), outputs.size());
+  for (size_t i = 0; i < requests.size(); ++i) {
+    const RequestOutput& output = outputs[i];
+    const bool failed =
+        output.status.has_value() && !output.status.value().ok();
+    if (!failed && !output.finished && !output.cancelled &&
+        !output.finished_on_prefill_instance) {
+      continue;
+    }
+    const std::function<void()>& release_slot =
+        requests[i]->state().release_request_slot;
+    if (release_slot) {
+      release_slot();
+    }
+  }
+}
+
+}  // namespace
 
 AsyncResponseProcessor::AsyncResponseProcessor(
     const Tokenizer* tokenizer,
@@ -170,6 +195,7 @@ void AsyncResponseProcessor::batch_process_completed_requests(
        requests = std::move(requests),
        request_outputs = std::move(request_outputs)]() mutable {
         counter->wait();
+        release_terminal_request_slots(requests, request_outputs);
         auto& resp_callback = requests[0]->state().outputs_func;
         resp_callback(request_outputs);
       });
@@ -337,6 +363,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
     auto& resp_callback = requests[0]->state().outputs_func;
     const absl::Time wait_start_time = absl::Now();
     counter->wait();
+    release_terminal_request_slots(requests, request_outputs);
     const double wait_ms =
         absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
     const absl::Time rpc_start_time = absl::Now();

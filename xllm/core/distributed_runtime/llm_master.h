@@ -50,12 +50,26 @@ class LLMMaster : public Master {
                       std::optional<Call*> call,
                       OutputCallback callback);
 
+  void handle_request(std::string prompt,
+                      std::optional<std::vector<int>> prompt_tokens,
+                      RequestParams sp,
+                      std::optional<Call*> call,
+                      OutputCallback callback,
+                      bool owns_request_slot);
+
   // chat
   void handle_request(std::vector<Message> messages,
                       std::optional<std::vector<int>> prompt_tokens,
                       RequestParams sp,
                       std::optional<Call*> call,
                       OutputCallback callback);
+
+  void handle_request(std::vector<Message> messages,
+                      std::optional<std::vector<int>> prompt_tokens,
+                      RequestParams sp,
+                      std::optional<Call*> call,
+                      OutputCallback callback,
+                      bool owns_request_slot);
 
   // batch completion
   void handle_batch_request(std::vector<std::string> prompts,
@@ -106,14 +120,16 @@ class LLMMaster : public Master {
       std::optional<std::vector<int>> prompt_tokens,
       const RequestParams& sp,
       std::optional<Call*> call,
-      OutputCallback callback);
+      OutputCallback callback,
+      std::function<void()> release_request_slot);
 
   std::shared_ptr<Request> generate_request(
       const std::vector<Message>& messages,
       std::optional<std::vector<int>> prompt_tokens,
       const RequestParams& sp,
       std::optional<Call*> call,
-      OutputCallback callback);
+      OutputCallback callback,
+      std::function<void()> release_request_slot);
 
  private:
   XServiceClient* xservice_client_ = nullptr;

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "rate_limiter.h"
+#include "core/common/rate_limiter.h"
 
 #include <gflags/gflags.h>
 
@@ -26,38 +26,60 @@ namespace xllm {
 bool RateLimiter::is_limited() {
   int32_t num_requests =
       num_concurrent_requests_.load(std::memory_order_relaxed);
+  const int32_t max_concurrent_requests =
+      ServiceConfig::get_instance().max_concurrent_requests();
 
-  // Check if sleeping.
-  if (num_requests == kSleeping) {
-    return true;
+  while (true) {
+    // Sleeping is represented by a negative sentinel. Treat any unexpected
+    // negative value as unavailable as well, instead of acquiring from an
+    // invalid state.
+    if (num_requests < 0) {
+      return true;
+    }
+
+    if ((max_concurrent_requests > 0 &&
+         num_requests >= max_concurrent_requests) ||
+        num_requests == INT32_MAX) {
+      COUNTER_INC(server_request_total_limit);
+      return true;
+    }
+
+    if (num_concurrent_requests_.compare_exchange_weak(
+            num_requests,
+            num_requests + 1,
+            std::memory_order_acq_rel,
+            std::memory_order_relaxed)) {
+      GAUGE_SET(num_concurrent_requests,
+                num_concurrent_requests_.load(std::memory_order_relaxed));
+      return false;
+    }
   }
-
-  // Check rate limit.
-  if (::xllm::ServiceConfig::get_instance().max_concurrent_requests() > 0 &&
-      num_requests >=
-          ::xllm::ServiceConfig::get_instance().max_concurrent_requests()) {
-    COUNTER_INC(server_request_total_limit);
-    return true;
-  }
-
-  num_concurrent_requests_.fetch_add(1, std::memory_order_relaxed);
-  GAUGE_SET(num_concurrent_requests,
-            num_concurrent_requests_.load(std::memory_order_relaxed));
-
-  return false;
 }
 
-void RateLimiter::decrease_one_request() {
-  num_concurrent_requests_.fetch_sub(1, std::memory_order_relaxed);
-  GAUGE_SET(num_concurrent_requests,
-            num_concurrent_requests_.load(std::memory_order_relaxed));
-}
+void RateLimiter::decrease_one_request() { decrease_requests(1); }
 
 void RateLimiter::decrease_requests(size_t decrease_requests_num) {
-  num_concurrent_requests_.fetch_sub(decrease_requests_num,
-                                     std::memory_order_relaxed);
-  GAUGE_SET(num_concurrent_requests,
-            num_concurrent_requests_.load(std::memory_order_relaxed));
+  if (decrease_requests_num == 0) {
+    return;
+  }
+
+  int32_t num_requests =
+      num_concurrent_requests_.load(std::memory_order_relaxed);
+  while (num_requests > 0) {
+    const int32_t updated_num_requests =
+        decrease_requests_num >= static_cast<size_t>(num_requests)
+            ? 0
+            : num_requests - static_cast<int32_t>(decrease_requests_num);
+    if (num_concurrent_requests_.compare_exchange_weak(
+            num_requests,
+            updated_num_requests,
+            std::memory_order_acq_rel,
+            std::memory_order_relaxed)) {
+      GAUGE_SET(num_concurrent_requests,
+                num_concurrent_requests_.load(std::memory_order_relaxed));
+      return;
+    }
+  }
 }
 
 bool RateLimiter::try_set_sleeping() {

@@ -16,6 +16,8 @@ limitations under the License.
 #pragma once
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 
 namespace xllm {
 
@@ -32,8 +34,10 @@ class RateLimiter final {
   // If not limited and not sleeping, increments the counter.
   bool is_limited();
 
+  // Releases an acquired slot. A release at zero or while sleeping is ignored.
   void decrease_one_request();
 
+  // Releases up to decrease_requests_num acquired slots without underflowing.
   void decrease_requests(size_t decrease_requests_num);
 
   int32_t get_num_concurrent_requests() const {
