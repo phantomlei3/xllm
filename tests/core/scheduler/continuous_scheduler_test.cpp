@@ -706,6 +706,51 @@ TEST(ContinuousSchedulerTest,
   EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
 }
 
+TEST(ContinuousSchedulerTest, FailedResponseReturnsAdmissionSlot) {
+  ServiceConfig::get_instance().max_concurrent_requests(1);
+  RateLimiter rate_limiter;
+
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  std::shared_ptr<Request> request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().admission_slot = rate_limiter.try_acquire();
+  ASSERT_NE(request->state().admission_slot, nullptr);
+  request->state().output_func = [](const RequestOutput&) { return true; };
+
+  scheduler->process_failed_request(request);
+  scheduler->wait_for_responses();
+
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0);
+}
+
+TEST(ContinuousSchedulerTest, IntermediateStreamOutputRetainsAdmissionSlot) {
+  ServiceConfig::get_instance().max_concurrent_requests(1);
+  RateLimiter rate_limiter;
+
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  std::shared_ptr<Request> request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().stream = true;
+  request->state().admission_slot = rate_limiter.try_acquire();
+  ASSERT_NE(request->state().admission_slot, nullptr);
+  request->state().outputs_func = [](const std::vector<RequestOutput>&) {
+    return std::vector<bool>{true};
+  };
+  make_request_decode_ready(request);
+  request->sequences()[0]->append_token(/*token_id=*/2);
+
+  std::vector<std::shared_ptr<Request>> requests{request};
+  scheduler->reject_streams(requests);
+
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+}
+
 TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   ServiceConfig::get_instance().max_concurrent_requests(3);
   RateLimiter rate_limiter;
