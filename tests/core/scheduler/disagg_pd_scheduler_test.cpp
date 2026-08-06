@@ -18,16 +18,21 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "common/metrics.h"
+#include "common/rate_limiter.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_impl.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -46,7 +51,7 @@ class FakeTokenizer final : public Tokenizer {
 
   std::string decode(const Slice<int32_t>& /*ids*/,
                      bool /*skip_special_tokens*/) const override {
-    NOT_IMPLEMENTED();
+    return "decoded";
   }
 
   std::optional<int32_t> token_to_id(
@@ -142,6 +147,27 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   void update_metrics(std::vector<Sequence*>& sequences) {
     update_token_latency_metrics(sequences);
   }
+
+  void set_running_request(std::shared_ptr<Request> request) {
+    running_requests_ = {request};
+    running_sequences_ = {request->sequences()[0].get()};
+  }
+
+  void enable_batch_response() {
+    response_processor_ = std::make_unique<AsyncResponseProcessor>(
+        engine_->tokenizer(),
+        options_.instance_role(),
+        /*enable_service_routing=*/true,
+        /*disable_log_stats=*/true,
+        [](std::shared_ptr<Request> /*request*/) {});
+  }
+};
+
+struct CallbackStats {
+  std::mutex mutex;
+  std::condition_variable cv;
+  int32_t completed = 0;
+  int32_t failed = 0;
 };
 
 DisaggPDScheduler::Options make_options() {
@@ -170,7 +196,9 @@ DisaggPDScheduler::Options make_decode_options() {
 }
 
 std::shared_ptr<Request> make_request(
-    const std::vector<int32_t>& prompt_token_ids) {
+    const std::vector<int32_t>& prompt_token_ids,
+    const OutputFunc& output_func = nullptr,
+    const OutputsFunc& outputs_func = nullptr) {
   RequestSamplingParam sampling_param;
   SchedulerParam scheduler_param;
 
@@ -187,13 +215,13 @@ std::shared_ptr<Request> make_request(
                      prompt_token_ids.size() + 8,
                      /*n=*/1,
                      /*best_of=*/1,
+                     /*logprobs=*/false,
                      /*stream=*/false,
                      /*echo=*/false,
-                     /*logprobs=*/false,
                      /*skip_special_tokens=*/false,
-                     /*include_usage=*/false,
-                     /*mm_data=*/nullptr,
-                     /*service_request_id=*/nullptr);
+                     /*enable_schedule_overlap=*/false,
+                     output_func,
+                     outputs_func);
 
   return std::make_shared<Request>(
       "req", "x-request-id", "x-request-time", state, "service-req");
@@ -250,7 +278,81 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
       num_cached_tokens);
 }
 
+bool wait_callbacks(CallbackStats* stats, int32_t count) {
+  CHECK(stats != nullptr);
+  std::unique_lock<std::mutex> lock(stats->mutex);
+  return stats->cv.wait_for(lock, std::chrono::seconds(5), [stats, count]() {
+    return stats->completed + stats->failed >= count;
+  });
+}
+
 }  // namespace
+
+TEST(DisaggPDSchedulerTest, MtpFailureReleasesAdmissionOnce) {
+  ServiceConfig::get_instance().max_concurrent_requests(1);
+  RateLimiter rate_limiter;
+  ASSERT_FALSE(rate_limiter.is_limited());
+  ASSERT_EQ(rate_limiter.get_num_concurrent_requests(), 1);
+
+  CallbackStats stats;
+  OutputFunc output_func = [&rate_limiter,
+                            &stats](const RequestOutput& output) -> bool {
+    if (output.status.has_value() && !output.status->ok()) {
+      rate_limiter.decrease_one_request();
+      {
+        std::lock_guard<std::mutex> lock(stats.mutex);
+        ++stats.failed;
+      }
+      stats.cv.notify_all();
+    }
+    return true;
+  };
+  OutputsFunc outputs_func =
+      [&rate_limiter, &stats](const std::vector<RequestOutput>& outputs) {
+        std::vector<bool> callback_status(outputs.size(), true);
+        for (const RequestOutput& output : outputs) {
+          if (output.finished || output.cancelled ||
+              output.finished_on_prefill_instance) {
+            rate_limiter.decrease_one_request();
+            {
+              std::lock_guard<std::mutex> lock(stats.mutex);
+              ++stats.completed;
+            }
+            stats.cv.notify_all();
+          }
+        }
+        return callback_status;
+      };
+
+  FakeEngine engine(/*num_blocks=*/8,
+                    /*block_size=*/2,
+                    /*num_speculative_tokens=*/1);
+  DisaggPDScheduler::Options options = make_options();
+  options.num_speculative_tokens(1).disable_log_stats(true);
+  TestDisaggPDScheduler scheduler(&engine, options);
+  scheduler.enable_batch_response();
+  std::shared_ptr<Request> request =
+      make_request({1, 2, 3, 4}, output_func, outputs_func);
+  finish_prefill(request->sequences()[0].get());
+  scheduler.set_running_request(request);
+
+  scheduler.prefill_send_first_generation();
+  ASSERT_TRUE(wait_callbacks(&stats, /*count=*/2));
+
+  int32_t completed = 0;
+  int32_t failed = 0;
+  {
+    std::lock_guard<std::mutex> lock(stats.mutex);
+    completed = stats.completed;
+    failed = stats.failed;
+  }
+  EXPECT_EQ(completed, 1);
+  EXPECT_EQ(failed, 1);
+  EXPECT_EQ(completed + failed, 1)
+      << "the request was accounted as terminal more than once";
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0)
+      << "the same admission was released more than once";
+}
 
 TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
