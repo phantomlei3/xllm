@@ -41,8 +41,8 @@ bool is_terminal_output(const RequestOutput& output) {
          output.finished_on_prefill_instance;
 }
 
-void release_admission_slot_if_terminal(const std::shared_ptr<Request>& request,
-                                        const RequestOutput& output) {
+void release_terminal_slot(const std::shared_ptr<Request>& request,
+                           const RequestOutput& output) {
   if (!is_terminal_output(output)) {
     return;
   }
@@ -54,12 +54,12 @@ void release_admission_slot_if_terminal(const std::shared_ptr<Request>& request,
   }
 }
 
-void release_admission_slots_if_terminal(
+void release_terminal_slots(
     const std::vector<std::shared_ptr<Request>>& requests,
     const std::vector<RequestOutput>& outputs) {
   CHECK_EQ(requests.size(), outputs.size());
   for (size_t i = 0; i < requests.size(); ++i) {
-    release_admission_slot_if_terminal(requests[i], outputs[i]);
+    release_terminal_slot(requests[i], outputs[i]);
   }
 }
 
@@ -105,7 +105,7 @@ void AsyncResponseProcessor::process_failed_request(
     output.service_request_id = request->service_request_id();
     output.target_xservice_addr = request->source_xservice_addr();
     output.status = status;
-    release_admission_slot_if_terminal(request, output);
+    release_terminal_slot(request, output);
     request->state().output_func(output);
   };
   if (request->state().response_thread_id < 0) {
@@ -148,7 +148,7 @@ void AsyncResponseProcessor::process_completed_request(
     if (!disable_log_stats_) {
       request->log_statistic(end_2_end_latency_seconds);
     }
-    release_admission_slot_if_terminal(request, req_output);
+    release_terminal_slot(request, req_output);
     request->state().output_func(req_output);
   };
   if (request->state().response_thread_id < 0) {
@@ -205,7 +205,7 @@ void AsyncResponseProcessor::batch_process_completed_requests(
        requests = std::move(requests),
        request_outputs = std::move(request_outputs)]() mutable {
         counter->wait();
-        release_admission_slots_if_terminal(requests, request_outputs);
+        release_terminal_slots(requests, request_outputs);
         auto& resp_callback = requests[0]->state().outputs_func;
         resp_callback(request_outputs);
       });
@@ -280,7 +280,7 @@ void AsyncResponseProcessor::process_stream_request(
       }
       req_output.finished = request_finished;
       req_output.cancelled = request_cancelled;
-      release_admission_slot_if_terminal(request, req_output);
+      release_terminal_slot(request, req_output);
       if (!request->state().output_func(req_output)) {
         cancel_request(request);
       }
@@ -388,7 +388,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
     auto& resp_callback = requests[0]->state().outputs_func;
     const absl::Time wait_start_time = absl::Now();
     counter->wait();
-    release_admission_slots_if_terminal(requests, request_outputs);
+    release_terminal_slots(requests, request_outputs);
     const double wait_ms =
         absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
     const absl::Time rpc_start_time = absl::Now();
