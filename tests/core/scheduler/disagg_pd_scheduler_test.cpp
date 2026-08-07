@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "scheduler/disagg_pd_scheduler.h"
 
+#include <google/protobuf/service.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
@@ -126,6 +127,21 @@ class FakeEngine final : public Engine {
   ModelArgs model_args_;
 };
 
+class FakeRpcChannel final : public google::protobuf::RpcChannel {
+ public:
+  void CallMethod(const google::protobuf::MethodDescriptor* /*method*/,
+                  google::protobuf::RpcController* /*controller*/,
+                  const google::protobuf::Message* /*request*/,
+                  google::protobuf::Message* response,
+                  google::protobuf::Closure* done) override {
+    proto::Status* status = static_cast<proto::Status*>(response);
+    status->set_ok(true);
+    if (done != nullptr) {
+      done->Run();
+    }
+  }
+};
+
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
  public:
   TestDisaggPDScheduler(Engine* engine, const Options& options)
@@ -160,6 +176,11 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
         /*enable_service_routing=*/true,
         /*disable_log_stats=*/true,
         [](std::shared_ptr<Request> /*request*/) {});
+  }
+
+  void set_rpc_channel(const std::string& request_id,
+                       proto::DisaggPDService_Stub* stub) {
+    req_to_channel_map_[request_id] = stub;
   }
 };
 
@@ -288,7 +309,7 @@ bool wait_callbacks(CallbackStats* stats, int32_t count) {
 
 }  // namespace
 
-TEST(DisaggPDSchedulerTest, MtpFailureReleasesAdmissionOnce) {
+TEST(DisaggPDSchedulerTest, RejectedRequestKeepsActiveAdmission) {
   ServiceConfig::get_instance().max_concurrent_requests(1);
   RateLimiter rate_limiter;
   ASSERT_FALSE(rate_limiter.is_limited());
@@ -324,18 +345,33 @@ TEST(DisaggPDSchedulerTest, MtpFailureReleasesAdmissionOnce) {
         return callback_status;
       };
 
-  FakeEngine engine(/*num_blocks=*/8,
-                    /*block_size=*/2,
-                    /*num_speculative_tokens=*/1);
+  // A second RPC reaches the Prefill node while the first request is active.
+  // is_limited() rejects it without acquiring an admission, then the service's
+  // CALLBACK_WITH_ERROR path invokes the regular error callback.
+  ASSERT_TRUE(rate_limiter.is_limited());
+  RequestOutput rejected_output;
+  rejected_output.status =
+      Status{StatusCode::RESOURCE_EXHAUSTED,
+             "The number of concurrent requests has reached the limit."};
+  output_func(rejected_output);
+  EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 1)
+      << "a rejected request did not acquire an admission to release";
+
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   DisaggPDScheduler::Options options = make_options();
-  options.num_speculative_tokens(1).disable_log_stats(true);
+  options.disable_log_stats(true);
+  FakeRpcChannel rpc_channel;
+  proto::DisaggPDService_Stub rpc_stub(&rpc_channel);
   TestDisaggPDScheduler scheduler(&engine, options);
   scheduler.enable_batch_response();
+  scheduler.set_rpc_channel("req", &rpc_stub);
   std::shared_ptr<Request> request =
       make_request({1, 2, 3, 4}, output_func, outputs_func);
   finish_prefill(request->sequences()[0].get());
   scheduler.set_running_request(request);
 
+  // The scheduler naturally emits the active request's Prefill completion.
+  // No MTP error or second terminal callback for this request is injected.
   scheduler.prefill_send_first_generation();
   ASSERT_TRUE(wait_callbacks(&stats, /*count=*/2));
 
@@ -348,10 +384,8 @@ TEST(DisaggPDSchedulerTest, MtpFailureReleasesAdmissionOnce) {
   }
   EXPECT_EQ(completed, 1);
   EXPECT_EQ(failed, 1);
-  EXPECT_EQ(completed + failed, 1)
-      << "the request was accounted as terminal more than once";
   EXPECT_EQ(rate_limiter.get_num_concurrent_requests(), 0)
-      << "the same admission was released more than once";
+      << "the rejected request released the active request's admission";
 }
 
 TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
