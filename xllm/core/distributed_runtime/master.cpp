@@ -78,7 +78,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
   }
   if (Platform::is_mlu() &&
       ParallelConfig::get_instance().kv_split_size() > 1) {
-    return "MLU DCP is not enabled yet; set kv_split_size=1";
+    return "MLU only support DCP  for now when kv split size > 1";
   }
   if (options.cp_size() == 1) {
     return std::nullopt;
