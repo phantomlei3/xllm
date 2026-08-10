@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace {
@@ -309,14 +310,25 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
   add_tensor(KVCacheTensorRole::INDEX_SCALE,
              indexer_cache_scale_,
              compressed_block_type_);
-  add_tensor(KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
-  add_tensor(
-      KVCacheTensorRole::SCORE_STATE, compress_state_.score(), BlockType::SWA);
-  add_tensor(
-      KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
-  add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
-             index_state_.score(),
-             BlockType::SWA);
+  if (Platform::is_mlu()) {
+    add_tensor(KVCacheTensorRole::COMPRESS_STATE,
+               compress_state_.packed(),
+               BlockType::SWA);
+    add_tensor(KVCacheTensorRole::COMPRESS_INDEX_STATE,
+               index_state_.packed(),
+               BlockType::SWA);
+  } else {
+    add_tensor(
+        KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
+    add_tensor(KVCacheTensorRole::SCORE_STATE,
+               compress_state_.score(),
+               BlockType::SWA);
+    add_tensor(
+        KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
+    add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
+               index_state_.score(),
+               BlockType::SWA);
+  }
   return tensors;
 }
 

@@ -366,7 +366,15 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
-    const bool enable_mla = engine_->model_args().enable_mla();
+    // DeepSeek-V4 is MLA-family too: its DSA attention caches a single
+    // compressed latent per token (one shared KV head), so the cache is
+    // TP-invariant — never head-sharded across TP ranks, and heterogeneous
+    // prefill->decode transfer needs no shard concatenation. That is precisely
+    // the property the topology guard relies on for MLA's unconditional
+    // heterogeneous-PD allowance, so fold V4 into enable_mla as well.
+    const bool enable_mla =
+        engine_->model_args().enable_mla() ||
+        util::is_deepseek_v4_model_type(engine_->model_args().model_type());
     const bool enable_heterogeneous_pd =
         DisaggPDConfig::get_instance().enable_heterogeneous_pd();
     const PdTopoResult topo_result =
