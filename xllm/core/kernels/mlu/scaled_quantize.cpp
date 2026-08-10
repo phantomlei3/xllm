@@ -31,6 +31,13 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
     bool is_gated /* = false */,
     at::ScalarType quant_type /* = at::kChar */
 ) {
+  // TMO fused SmoothQuant accepts "gelu", while Qwen vision configs use
+  // the Hugging Face alias "gelu_pytorch_tanh".
+  std::string mlu_act_mode = act_mode;
+  if (mlu_act_mode == "gelu_pytorch_tanh") {
+    mlu_act_mode = "gelu";
+  }
+
   // If act_mode is "none", override is_gated to false
   bool gated = is_gated;
   if (act_mode == "none") {
@@ -84,7 +91,7 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
       gather_index_start_position,
       /*scale_upper_bound*/ std::nullopt,
       /*quant_algo=*/std::string("dynamic_per_token"),
-      act_mode,
+      mlu_act_mode,
       active_coef,
       gated);
 
