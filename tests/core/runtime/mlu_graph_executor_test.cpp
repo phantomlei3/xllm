@@ -34,6 +34,7 @@ limitations under the License.
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
+#include "platform/platform.h"
 #include "runtime/decode_graph_warmup_plan.h"
 #include "runtime/options.h"
 
@@ -94,6 +95,10 @@ TEST(DecodeGraphWarmupPlanTest, MapsTokenBucketsWithAndWithoutPadding) {
   EXPECT_EQ(runtime::get_decode_graph_token_bucket(
                 /*num_tokens=*/17, /*enable_no_padding=*/true),
             17);
+}
+
+TEST(DecodeGraphWarmupPlanTest, MtpGraphWarmupCapabilityIsEnabledForMlu) {
+  EXPECT_TRUE(Platform::supports_mtp_decode_graph_warmup());
 }
 
 TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {

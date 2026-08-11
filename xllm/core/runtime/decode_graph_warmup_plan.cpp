@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
+#include "platform/platform.h"
 #include "runtime/options.h"
 
 namespace xllm::runtime {
@@ -103,7 +104,17 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   plan.execution_shape.enable_graph_mode_decode_no_padding =
       options.enable_graph_mode_decode_no_padding();
 
-#if defined(USE_MLU)
+  // MTP emits num_decoding_tokens rows per sequence. On supporting backends,
+  // the graph cache is keyed by the padded number of rows rather than the
+  // sequence count. Therefore the compatibility schedule can miss a graph
+  // bucket (for example, batch size 9 with four decode tokens starts the
+  // 48-token bucket). Platform owns this capability decision so this generic
+  // plan does not depend on a device build macro. A backend must not opt in
+  // until its graph keying and MTP replay behavior are covered by tests.
+  if (!::xllm::Platform::supports_mtp_decode_graph_warmup()) {
+    return plan;
+  }
+
   const bool use_mtp_batches =
       !plan.execution_shape.enable_graph_mode_decode_no_padding &&
       plan.execution_shape.num_decoding_tokens > 1 &&
@@ -133,7 +144,6 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
     batch_sizes.emplace_back(max_global_batch_size);
   }
   plan.batch_sizes = std::move(batch_sizes);
-#endif
 
   return plan;
 }
