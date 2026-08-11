@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
 #include "framework/model/causal_vlm.h"
-#include "runtime/decode_graph_warmup_plan.h"
+#include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
 #include "vlm_executor_impl.h"
 

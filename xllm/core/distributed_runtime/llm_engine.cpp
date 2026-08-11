@@ -121,11 +121,14 @@ LLMEngine::LLMEngine(const runtime::Options& options,
       /*pool_name=*/"LLMEngine.forward_input");
 }
 
-runtime::DecodeGraphWarmupPlan LLMEngine::decode_graph_warmup_plan(
-    int32_t max_global_batch_size,
-    int32_t dp_size) const {
-  return runtime::build_decode_graph_warmup_plan(
-      options_, max_global_batch_size, dp_size);
+runtime::DecodeGraphExecutionShape LLMEngine::decode_graph_execution_shape()
+    const {
+  runtime::DecodeGraphExecutionShape execution_shape;
+  execution_shape.num_decoding_tokens = options_.num_decoding_tokens();
+  execution_shape.num_speculative_tokens = options_.num_speculative_tokens();
+  execution_shape.enable_graph_mode_decode_no_padding =
+      options_.enable_graph_mode_decode_no_padding();
+  return execution_shape;
 }
 
 void LLMEngine::process_group_test() {

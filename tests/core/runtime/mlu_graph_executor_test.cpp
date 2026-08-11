@@ -34,8 +34,7 @@ limitations under the License.
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
-#include "platform/platform.h"
-#include "runtime/decode_graph_warmup_plan.h"
+#include "runtime/decode_graph_bucket.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -62,7 +61,7 @@ class ScopedConfigSnapshot final {
   bool enable_graph_mode_decode_no_padding_;
 };
 
-class CompatibilityPlanEngine final : public Engine {
+class CompatibilityShapeEngine final : public Engine {
  public:
   ForwardOutput step(std::vector<Batch>& /*batch*/) override { return {}; }
 
@@ -73,7 +72,7 @@ class CompatibilityPlanEngine final : public Engine {
   }
 };
 
-TEST(DecodeGraphWarmupPlanTest, MapsTokenBucketsWithAndWithoutPadding) {
+TEST(DecodeGraphBucketTest, MapsTokenBucketsWithAndWithoutPadding) {
   EXPECT_EQ(runtime::get_decode_graph_token_bucket(
                 /*num_tokens=*/1, /*enable_no_padding=*/false),
             1);
@@ -97,79 +96,15 @@ TEST(DecodeGraphWarmupPlanTest, MapsTokenBucketsWithAndWithoutPadding) {
             17);
 }
 
-TEST(DecodeGraphWarmupPlanTest, MtpGraphWarmupCapabilityIsEnabledForMlu) {
-  EXPECT_TRUE(Platform::supports_mtp_decode_graph_warmup());
-}
+TEST(DecodeGraphExecutionShapeTest, DefaultEngineUsesSingleTokenDecodeShape) {
+  CompatibilityShapeEngine engine;
 
-TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
-  runtime::Options options;
-  options.num_decoding_tokens(/*num_decoding_tokens=*/4)
-      .num_speculative_tokens(/*num_speculative_tokens=*/3)
-      .enable_graph_mode_decode_no_padding(/*enable_no_padding=*/false);
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      engine.decode_graph_execution_shape();
 
-  const runtime::DecodeGraphWarmupPlan plan =
-      runtime::build_decode_graph_warmup_plan(
-          options, /*max_global_batch_size=*/64, /*dp_size=*/1);
-
-  EXPECT_EQ(
-      plan.batch_sizes,
-      (std::vector<int32_t>{
-          1, 2, 3, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61}));
-}
-
-TEST(DecodeGraphWarmupPlanTest, UsesLocalDpBatchesAndKeepsPartialBatch) {
-  runtime::Options options;
-  options.num_decoding_tokens(/*num_decoding_tokens=*/4)
-      .enable_graph_mode_decode_no_padding(/*enable_no_padding=*/false);
-
-  const runtime::DecodeGraphWarmupPlan plan =
-      runtime::build_decode_graph_warmup_plan(
-          options, /*max_global_batch_size=*/66, /*dp_size=*/4);
-
-  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 12, 20, 36, 52, 66}));
-}
-
-TEST(DecodeGraphWarmupPlanTest, NoPaddingKeepsCompatibilityBatches) {
-  runtime::Options options;
-  options.num_decoding_tokens(/*num_decoding_tokens=*/4)
-      .enable_graph_mode_decode_no_padding(/*enable_no_padding=*/true);
-
-  const runtime::DecodeGraphWarmupPlan plan =
-      runtime::build_decode_graph_warmup_plan(
-          options, /*max_global_batch_size=*/64, /*dp_size=*/1);
-
-  EXPECT_EQ(plan.batch_sizes,
-            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
-}
-
-TEST(DecodeGraphWarmupPlanTest, UsesEffectiveRuntimeOptionsInsteadOfGlobals) {
-  ScopedConfigSnapshot config_snapshot;
-  ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
-
-  runtime::Options options;
-  options.num_decoding_tokens(/*num_decoding_tokens=*/4)
-      .num_speculative_tokens(/*num_speculative_tokens=*/3)
-      .enable_graph_mode_decode_no_padding(/*enable_no_padding=*/false);
-
-  const runtime::DecodeGraphWarmupPlan plan =
-      runtime::build_decode_graph_warmup_plan(
-          options, /*max_global_batch_size=*/16, /*dp_size=*/1);
-
-  EXPECT_EQ(plan.execution_shape.num_decoding_tokens, 4);
-  EXPECT_EQ(plan.execution_shape.num_speculative_tokens, 3);
-  EXPECT_FALSE(plan.execution_shape.enable_graph_mode_decode_no_padding);
-  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 3, 5, 9, 13}));
-}
-
-TEST(DecodeGraphWarmupPlanTest, DefaultEngineKeepsCompatibilityBuckets) {
-  CompatibilityPlanEngine engine;
-
-  const runtime::DecodeGraphWarmupPlan plan =
-      engine.decode_graph_warmup_plan(/*max_global_batch_size=*/64,
-                                      /*dp_size=*/1);
-
-  EXPECT_EQ(plan.batch_sizes,
-            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
+  EXPECT_EQ(execution_shape.num_decoding_tokens, 1);
+  EXPECT_EQ(execution_shape.num_speculative_tokens, 0);
+  EXPECT_FALSE(execution_shape.enable_graph_mode_decode_no_padding);
 }
 
 }  // namespace

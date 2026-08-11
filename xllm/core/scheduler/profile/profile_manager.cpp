@@ -57,8 +57,10 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
-  decode_graph_warmup_plan_ = engine_->decode_graph_warmup_plan(
-      max_decode_batch_size, options_.dp_size());
+  decode_graph_warmup_plan_ =
+      build_decode_graph_warmup_plan(engine_->decode_graph_execution_shape(),
+                                     max_decode_batch_size,
+                                     options_.dp_size());
   block_manager_pool_ = engine_->block_manager_pool();
   CHECK(block_manager_pool_ != nullptr);
   prefill_time_predictor_ = std::make_unique<TimePredictor>(

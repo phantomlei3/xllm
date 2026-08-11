@@ -51,9 +51,8 @@ class SpeculativeEngine : public Engine {
       const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
       override;
 
-  runtime::DecodeGraphWarmupPlan decode_graph_warmup_plan(
-      int32_t max_global_batch_size,
-      int32_t dp_size) const override;
+  runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const override;
 
   const TokenizerArgs& tokenizer_args() const override {
     return engine_->tokenizer_args();

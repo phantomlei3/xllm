@@ -25,7 +25,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
-#include "runtime/decode_graph_warmup_plan.h"
+#include "runtime/decode_graph_bucket.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -62,11 +62,9 @@ class Engine {
     return false;
   }
 
-  virtual runtime::DecodeGraphWarmupPlan decode_graph_warmup_plan(
-      int32_t max_global_batch_size,
-      int32_t dp_size) const {
-    return runtime::get_compatibility_decode_graph_warmup_plan(
-        max_global_batch_size, dp_size);
+  virtual runtime::DecodeGraphExecutionShape decode_graph_execution_shape()
+      const {
+    return {};
   }
 
   // return the tokenizer args
