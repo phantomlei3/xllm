@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "block_manager_pool.h"
 #include "composite_block_manager.h"
+#include "core/framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "distributed_runtime/engine.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/timer.h"
@@ -112,6 +113,10 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
   std::mutex prefetch_plans_mutex_;
   std::unordered_map<Sequence*, std::shared_ptr<PrefetchPlan>> prefetch_plans_;
+
+  // Declared last so destruction waits for callbacks before any manager or
+  // block storage captured by those callbacks is released.
+  KVTransferTracker offload_transfers_;
 };
 
 }  // namespace xllm

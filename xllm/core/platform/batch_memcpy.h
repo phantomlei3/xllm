@@ -37,6 +37,14 @@ class BatchMemcpy {
                         const std::vector<torch::Tensor>& dst_tensors,
                         Stream* stream) = 0;
 
+  // Submits H2D copies without waiting for stream completion. Backends that
+  // do not support non-blocking submission keep the synchronous contract.
+  virtual bool submit_h2d(const std::vector<torch::Tensor>& src_tensors,
+                          const std::vector<torch::Tensor>& dst_tensors,
+                          Stream* stream) {
+    return copy_h2d(src_tensors, dst_tensors, stream);
+  }
+
   virtual bool copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                         const std::vector<torch::Tensor>& dst_tensors,
                         Stream* stream) = 0;

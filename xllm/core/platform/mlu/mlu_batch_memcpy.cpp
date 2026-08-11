@@ -52,13 +52,31 @@ void MLUBatchMemcpy::init(int32_t device_id) {
 bool MLUBatchMemcpy::copy_h2d(const std::vector<torch::Tensor>& src_tensors,
                               const std::vector<torch::Tensor>& dst_tensors,
                               Stream* stream) {
-  return copy(src_tensors, dst_tensors, stream, Direction::H2D);
+  return copy(src_tensors,
+              dst_tensors,
+              stream,
+              Direction::H2D,
+              CompletionMode::SYNCHRONIZE);
+}
+
+bool MLUBatchMemcpy::submit_h2d(const std::vector<torch::Tensor>& src_tensors,
+                                const std::vector<torch::Tensor>& dst_tensors,
+                                Stream* stream) {
+  return copy(src_tensors,
+              dst_tensors,
+              stream,
+              Direction::H2D,
+              CompletionMode::SUBMIT_ONLY);
 }
 
 bool MLUBatchMemcpy::copy_d2h(const std::vector<torch::Tensor>& src_tensors,
                               const std::vector<torch::Tensor>& dst_tensors,
                               Stream* stream) {
-  return copy(src_tensors, dst_tensors, stream, Direction::D2H);
+  return copy(src_tensors,
+              dst_tensors,
+              stream,
+              Direction::D2H,
+              CompletionMode::SYNCHRONIZE);
 }
 
 bool MLUBatchMemcpy::valid_inputs(const std::vector<torch::Tensor>& src_tensors,
@@ -129,7 +147,8 @@ bool MLUBatchMemcpy::valid_inputs(const std::vector<torch::Tensor>& src_tensors,
 bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
                           const std::vector<torch::Tensor>& dst_tensors,
                           Stream* stream,
-                          Direction direction) {
+                          Direction direction,
+                          CompletionMode completion_mode) {
   try {
     if (!valid_inputs(src_tensors, dst_tensors, stream, direction)) {
       return false;
@@ -186,7 +205,6 @@ bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
       }
     }
 
-    const CNresult sync_result = cnQueueSync(queue);
     if (!submitted) {
       LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
                  << " submission failed: chunk_offset=" << failed_offset
@@ -194,13 +212,18 @@ bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
                  << ", result=" << static_cast<int32_t>(submit_result)
                  << ", error=" << cn_error_text(submit_result);
     }
+    if (!submitted || completion_mode == CompletionMode::SUBMIT_ONLY) {
+      return submitted;
+    }
+
+    const CNresult sync_result = cnQueueSync(queue);
     if (sync_result != CN_SUCCESS) {
       LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
                  << " queue sync failed: chunk_offset=0, chunk_count=" << count
                  << ", result=" << static_cast<int32_t>(sync_result)
                  << ", error=" << cn_error_text(sync_result);
     }
-    return submitted && sync_result == CN_SUCCESS;
+    return sync_result == CN_SUCCESS;
   } catch (const std::exception& error) {
     LOG(ERROR) << "MLU batch memcpy "
                << direction_name(direction == Direction::H2D)

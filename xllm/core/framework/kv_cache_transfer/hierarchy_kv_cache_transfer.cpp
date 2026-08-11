@@ -256,7 +256,24 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
   }
 }
 
-HierarchyKVCacheTransfer::~HierarchyKVCacheTransfer() = default;
+HierarchyKVCacheTransfer::~HierarchyKVCacheTransfer() {
+  // Joining the load pool first guarantees no producer can enqueue more work
+  // while the copy streams and host cache storage are being released.
+  load_threadpool_.reset();
+
+  device_.set_device();
+  std::unique_ptr<Stream> stream;
+  while (copy_stream_.try_dequeue(stream)) {
+    if (stream == nullptr) {
+      continue;
+    }
+    CHECK_EQ(stream->synchronize(), 0)
+        << "Failed to drain hierarchy KV copy stream during shutdown.";
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  layer_wise_load_synchronizer_.clear();
+}
 
 void HierarchyKVCacheTransfer::build_device_block_type_map() {
   device_kv_caches_.clear();
@@ -568,7 +585,7 @@ bool HierarchyKVCacheTransfer::load_from_host(
       }
       continue;
     }
-    if (!batch_memcpy_->copy_h2d(
+    if (!batch_memcpy_->submit_h2d(
             plan.src_tensors, plan.dst_tensors, stream.get())) {
       success = false;
       break;

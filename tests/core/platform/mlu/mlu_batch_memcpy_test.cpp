@@ -15,11 +15,16 @@ limitations under the License.
 
 #include "core/platform/mlu/mlu_batch_memcpy.h"
 
+#include <cnrt.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "core/framework/kv_cache/kv_cache_utils.h"
@@ -123,6 +128,48 @@ TEST_F(MLUBatchMemcpyTest, RoundTripSupportsDifferentTensorSizes) {
   for (size_t index = 0; index < widths.size(); ++index) {
     EXPECT_TRUE(torch::equal(sources[index], restored[index]));
   }
+}
+
+TEST_F(MLUBatchMemcpyTest, SubmitH2DReturnsBeforeCopyStreamCompletes) {
+  torch::Tensor host;
+  HostPageAlignedRegion host_region;
+  create_host_page_aligned_tensor({16}, torch::kUInt8, &host, &host_region);
+  host.fill_(23);
+  const torch::Tensor device_tensor = torch::zeros(
+      {16},
+      torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  ASSERT_EQ(device_->synchronize_default_stream(), 0);
+
+  std::atomic<bool> gate_open{false};
+  ASSERT_EQ(cnrtInvokeHostFunc(
+                stream_->get_stream()->stream(),
+                [](void* user_data) {
+                  std::atomic<bool>* gate =
+                      static_cast<std::atomic<bool>*>(user_data);
+                  while (!gate->load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                  }
+                },
+                &gate_open),
+            cnrtSuccess);
+
+  std::future<bool> submit_result =
+      std::async(std::launch::async, [this, &host, &device_tensor]() {
+        device_->set_device();
+        device_->init_device_context();
+        return batch_memcpy_->submit_h2d(
+            {host}, {device_tensor}, stream_.get());
+      });
+  const std::future_status submit_status =
+      submit_result.wait_for(std::chrono::milliseconds(250));
+  gate_open.store(true, std::memory_order_release);
+
+  ASSERT_EQ(submit_result.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  ASSERT_TRUE(submit_result.get());
+  ASSERT_EQ(stream_->synchronize(), 0);
+  EXPECT_EQ(submit_status, std::future_status::ready);
+  EXPECT_TRUE(torch::all(device_tensor.cpu() == 23).item<bool>());
 }
 
 TEST_F(MLUBatchMemcpyTest, RejectsInvalidInputs) {
