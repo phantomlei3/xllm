@@ -25,6 +25,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
+#include "runtime/decode_graph_warmup_plan.h"
 #include "runtime/options.h"
 
 namespace xllm {

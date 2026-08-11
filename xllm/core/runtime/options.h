@@ -20,7 +20,6 @@ limitations under the License.
 #include <limits>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "common/macros.h"
@@ -28,17 +27,6 @@ limitations under the License.
 
 namespace xllm {
 namespace runtime {
-
-struct DecodeGraphExecutionShape {
-  int64_t num_decoding_tokens = 1;
-  int32_t num_speculative_tokens = 0;
-  bool enable_graph_mode_decode_no_padding = false;
-};
-
-struct DecodeGraphWarmupPlan {
-  DecodeGraphExecutionShape execution_shape;
-  std::vector<int32_t> batch_sizes;
-};
 
 struct Options {
   PROPERTY(std::string, model_path);
@@ -293,107 +281,6 @@ struct Options {
   // max concurrency for rec worker
   PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 };
-
-inline int64_t get_decode_graph_token_bucket(int64_t num_tokens,
-                                             bool enable_no_padding) {
-  if (enable_no_padding) {
-    return num_tokens;
-  }
-  if (num_tokens <= 1) {
-    return 1;
-  }
-  if (num_tokens <= 2) {
-    return 2;
-  }
-  if (num_tokens <= 4) {
-    return 4;
-  }
-  if (num_tokens <= 8) {
-    return 8;
-  }
-
-  constexpr int64_t kGraphTokenStep = 16;
-  return ((num_tokens + kGraphTokenStep - 1) / kGraphTokenStep) *
-         kGraphTokenStep;
-}
-
-inline DecodeGraphWarmupPlan get_compatibility_decode_graph_warmup_plan(
-    int32_t max_global_batch_size,
-    int32_t dp_size) {
-  DecodeGraphWarmupPlan plan;
-  if (max_global_batch_size <= 0 || dp_size <= 0) {
-    return plan;
-  }
-
-  const std::vector<int32_t> small_batch_sizes = {1, 2, 4, 8, 16};
-  for (int32_t batch_size : small_batch_sizes) {
-    if (batch_size >= dp_size && batch_size <= max_global_batch_size) {
-      plan.batch_sizes.emplace_back(batch_size);
-    }
-  }
-
-  for (int32_t batch_size = 32; batch_size <= max_global_batch_size;
-       batch_size += 16) {
-    if (batch_size >= dp_size) {
-      plan.batch_sizes.emplace_back(batch_size);
-    }
-  }
-
-  if (max_global_batch_size >= dp_size &&
-      (plan.batch_sizes.empty() ||
-       plan.batch_sizes.back() != max_global_batch_size)) {
-    plan.batch_sizes.emplace_back(max_global_batch_size);
-  }
-
-  return plan;
-}
-
-inline DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
-    const Options& options,
-    int32_t max_global_batch_size,
-    int32_t dp_size) {
-  DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
-      max_global_batch_size, dp_size);
-  plan.execution_shape.num_decoding_tokens = options.num_decoding_tokens();
-  plan.execution_shape.num_speculative_tokens =
-      options.num_speculative_tokens();
-  plan.execution_shape.enable_graph_mode_decode_no_padding =
-      options.enable_graph_mode_decode_no_padding();
-
-#if defined(USE_MLU)
-  const bool use_mtp_batches =
-      !plan.execution_shape.enable_graph_mode_decode_no_padding &&
-      plan.execution_shape.num_decoding_tokens > 1 &&
-      max_global_batch_size >= dp_size && dp_size > 0;
-  if (!use_mtp_batches) {
-    return plan;
-  }
-
-  const int32_t max_local_batch_size = max_global_batch_size / dp_size;
-  std::vector<int32_t> batch_sizes;
-  batch_sizes.reserve(static_cast<size_t>(max_local_batch_size) + 1);
-  int64_t last_token_bucket = 0;
-  for (int32_t local_batch_size = 1; local_batch_size <= max_local_batch_size;
-       ++local_batch_size) {
-    const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                               plan.execution_shape.num_decoding_tokens;
-    const int64_t token_bucket = get_decode_graph_token_bucket(
-        num_tokens, plan.execution_shape.enable_graph_mode_decode_no_padding);
-    if (batch_sizes.empty() || token_bucket != last_token_bucket) {
-      batch_sizes.emplace_back(local_batch_size * dp_size);
-      last_token_bucket = token_bucket;
-    }
-  }
-
-  const int32_t max_full_global_batch_size = max_local_batch_size * dp_size;
-  if (max_full_global_batch_size < max_global_batch_size) {
-    batch_sizes.emplace_back(max_global_batch_size);
-  }
-  plan.batch_sizes = std::move(batch_sizes);
-#endif
-
-  return plan;
-}
 
 }  // namespace runtime
 }  // namespace xllm

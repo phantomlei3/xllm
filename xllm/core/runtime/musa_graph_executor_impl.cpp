@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/layers/musa/flashinfer_planinfo.h"
 #include "core/platform/cuda/device_capture_lock.h"
 #include "core/platform/device.h"
+#include "core/runtime/decode_graph_warmup_plan.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/utils.h"

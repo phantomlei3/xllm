@@ -34,6 +34,7 @@ limitations under the License.
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
+#include "runtime/decode_graph_warmup_plan.h"
 #include "runtime/options.h"
 
 namespace xllm {

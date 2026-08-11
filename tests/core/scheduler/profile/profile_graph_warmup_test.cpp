@@ -25,6 +25,7 @@ limitations under the License.
 #include "framework/request/incremental_decoder.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
+#include "runtime/decode_graph_warmup_plan.h"
 #include "scheduler/profile/graph_warmup.h"
 
 namespace xllm {
@@ -64,29 +65,36 @@ Sequence make_sequence(size_t index, const std::vector<int32_t>& tokens) {
 }
 
 TEST(GraphWarmupTest, BuildsCanonicalBuckets) {
-  const std::vector<int32_t> buckets = graph_warmup_buckets(64);
+  const runtime::DecodeGraphWarmupPlan plan =
+      runtime::get_compatibility_decode_graph_warmup_plan(
+          /*max_global_batch_size=*/64, /*dp_size=*/1);
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
+  EXPECT_EQ(plan.batch_sizes,
+            (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 48, 64}));
 }
 
 TEST(GraphWarmupTest, IncludesNonCanonicalMaxBucket) {
-  const std::vector<int32_t> buckets = graph_warmup_buckets(40);
+  const runtime::DecodeGraphWarmupPlan plan =
+      runtime::get_compatibility_decode_graph_warmup_plan(
+          /*max_global_batch_size=*/40, /*dp_size=*/1);
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 40}));
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 16, 32, 40}));
 }
 
 TEST(GraphWarmupTest, SkipsBucketsBelowDpSize) {
-  const std::vector<int32_t> buckets =
-      graph_decode_buckets(/*max_seqs_per_batch=*/16, /*dp_size=*/4);
+  const runtime::DecodeGraphWarmupPlan plan =
+      runtime::get_compatibility_decode_graph_warmup_plan(
+          /*max_global_batch_size=*/16, /*dp_size=*/4);
 
-  EXPECT_EQ(buckets, (std::vector<int32_t>{4, 8, 16}));
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{4, 8, 16}));
 }
 
 TEST(GraphWarmupTest, AllowsAllBucketsSkipped) {
-  const std::vector<int32_t> buckets =
-      graph_decode_buckets(/*max_seqs_per_batch=*/2, /*dp_size=*/4);
+  const runtime::DecodeGraphWarmupPlan plan =
+      runtime::get_compatibility_decode_graph_warmup_plan(
+          /*max_global_batch_size=*/2, /*dp_size=*/4);
 
-  EXPECT_TRUE(buckets.empty());
+  EXPECT_TRUE(plan.batch_sizes.empty());
 }
 
 TEST(GraphWarmupTest, PrefillRoleUsesPrefillOnlyPlan) {
