@@ -121,6 +121,13 @@ LLMEngine::LLMEngine(const runtime::Options& options,
       /*pool_name=*/"LLMEngine.forward_input");
 }
 
+runtime::DecodeGraphWarmupPlan LLMEngine::decode_graph_warmup_plan(
+    int32_t max_global_batch_size,
+    int32_t dp_size) const {
+  return runtime::build_decode_graph_warmup_plan(
+      options_, max_global_batch_size, dp_size);
+}
+
 void LLMEngine::process_group_test() {
 #if !defined(USE_NPU)
   // In multi-node serving mode, only driver engine

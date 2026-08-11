@@ -73,6 +73,12 @@ SuffixSpeculativeEngine::SuffixSpeculativeEngine(
     const runtime::Options& options)
     : SpeculativeEngine(options, /*use_draft_engine=*/false) {}
 
+runtime::DecodeGraphWarmupPlan SpeculativeEngine::decode_graph_warmup_plan(
+    int32_t max_global_batch_size,
+    int32_t dp_size) const {
+  return engine_->decode_graph_warmup_plan(max_global_batch_size, dp_size);
+}
+
 bool SpeculativeEngine::init(MasterStatus master_status) {
   if (!init_model()) {
     return false;

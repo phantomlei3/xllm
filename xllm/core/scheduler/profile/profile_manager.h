@@ -194,6 +194,8 @@ class ProfileManager {
 
   Engine* engine_;
 
+  runtime::DecodeGraphWarmupPlan decode_graph_warmup_plan_;
+
   BlockManagerPool* block_manager_pool_;
 
   int32_t profile_length_step_ = 256;

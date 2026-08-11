@@ -61,6 +61,13 @@ class Engine {
     return false;
   }
 
+  virtual runtime::DecodeGraphWarmupPlan decode_graph_warmup_plan(
+      int32_t max_global_batch_size,
+      int32_t dp_size) const {
+    return runtime::get_compatibility_decode_graph_warmup_plan(
+        max_global_batch_size, dp_size);
+  }
+
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {
     return tokenizer_args_;

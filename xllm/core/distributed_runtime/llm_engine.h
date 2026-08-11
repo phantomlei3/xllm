@@ -57,6 +57,10 @@ class LLMEngine : public Engine {
 
   const runtime::Options& options() const { return options_; }
 
+  runtime::DecodeGraphWarmupPlan decode_graph_warmup_plan(
+      int32_t max_global_batch_size,
+      int32_t dp_size) const override;
+
   bool init(MasterStatus master_status) override;
 
   bool set_speculative_validate_time_predictor(
