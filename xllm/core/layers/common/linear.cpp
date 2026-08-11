@@ -1018,7 +1018,22 @@ QKVParallelLinearImpl::QKVParallelLinearImpl(
   (void)linear_extra_args;
   // Note: torch.nn.functional.linear performs XA^T + b and as a result
   // we allocate the transpose.
-  if (quant_args_.quant_method() == kQuantMethodFp8) {
+  if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+    qweight_ = register_parameter(
+        "qweight",
+        torch::empty({out_features_per_partition, hidden_size},
+                     options.dtype(torch::kInt8)),
+        /*requires_grad=*/false);
+    per_channel_scale_ =
+        register_parameter("per_channel_scale",
+                           torch::empty({out_features_per_partition},
+                                        options.dtype(torch::kFloat32)),
+                           /*requires_grad=*/false);
+    smooth_ = register_parameter(
+        "smooth",
+        torch::empty({hidden_size}, options.dtype(torch::kFloat32)),
+        /*requires_grad=*/false);
+  } else if (quant_args_.quant_method() == kQuantMethodFp8) {
     // FP8 W8A8 quantization - weight is stored as FP8 (float8_e4m3fn)
     weight_ = register_parameter(
         "weight",
@@ -1070,7 +1085,29 @@ torch::Tensor QKVParallelLinearImpl::forward(torch::Tensor input) {
       bias_.defined() ? std::optional<torch::Tensor>(bias_) : std::nullopt;
 
   torch::Tensor output;
-  if (quant_args_.quant_method() == kQuantMethodFp8) {
+  if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+    CHECK(qweight_.defined()) << "qweight is required for smoothquant.";
+    CHECK(per_channel_scale_.defined())
+        << "per_channel_scale is required for smoothquant.";
+    CHECK(smooth_.defined()) << "smooth is required for smoothquant.";
+
+    xllm::kernel::ScaledQuantizeParams quantize_params;
+    quantize_params.x = input;
+    quantize_params.smooth = smooth_;
+    auto [quantized_input, input_scale] =
+        xllm::kernel::scaled_quantize(quantize_params);
+
+    xllm::kernel::ScaledMatmulParams matmul_params;
+    matmul_params.a = quantized_input;
+    matmul_params.b = qweight_;
+    matmul_params.a_scale = input_scale;
+    matmul_params.b_scale = per_channel_scale_;
+    matmul_params.output_dtype = output_dtype_;
+    matmul_params.bias = bias;
+    matmul_params.beta = 0.0;
+    matmul_params.a_quant_bit_size = 8;
+    output = xllm::kernel::scaled_matmul(matmul_params);
+  } else if (quant_args_.quant_method() == kQuantMethodFp8) {
     check_fp8_activation_dynamic_supported(quant_args_);
     auto a_scale = input_scale_.defined()
                        ? std::optional<torch::Tensor>(input_scale_)
@@ -1152,7 +1189,14 @@ void QKVParallelLinearImpl::load_state_dict(
                           weight_scale_is_loaded_,
                           weight_offset_,
                           weight_offset_is_loaded_});
-  LOAD_QKV_WEIGHT(weight, 0, num_kv_head_replicas_);
+  if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+    LOAD_QKV_WEIGHT(qweight, 0, num_kv_head_replicas_);
+    LOAD_QKV_WEIGHT(per_channel_scale, 0, num_kv_head_replicas_);
+    load_shared_tensor_from_prefixes_or_fail(
+        state_dict, prefixes, "smooth", smooth_, smooth_is_loaded_);
+  } else {
+    LOAD_QKV_WEIGHT(weight, 0, num_kv_head_replicas_);
+  }
   if (bias_.defined()) {
     LOAD_QKV_WEIGHT(bias, 0, num_kv_head_replicas_);
   }
@@ -1264,7 +1308,13 @@ void QKVParallelLinearImpl::load_state_dict(const StateDict& state_dict) {
                           weight_offset_,
                           weight_offset_is_loaded_});
   CHECK_EQ(num_heads_, num_kv_heads_);
-  LOAD_MERGED_WEIGHT(weight, 0);
+  if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+    LOAD_MERGED_WEIGHT(qweight, 0);
+    LOAD_MERGED_WEIGHT(per_channel_scale, 0);
+    LOAD_WEIGHT(smooth);
+  } else {
+    LOAD_MERGED_WEIGHT(weight, 0);
+  }
 
   if (bias_.defined()) {
     LOAD_MERGED_WEIGHT(bias, 0);
