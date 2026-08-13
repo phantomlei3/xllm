@@ -36,6 +36,24 @@ std::string cn_error_text(CNresult result) {
 
 const char* direction_name(bool h2d) { return h2d ? "H2D" : "D2H"; }
 
+void drain_queue_after_failure(CNqueue queue,
+                               const char* operation,
+                               size_t descriptor_count) {
+  const CNresult drain_result = cnQueueSync(queue);
+  LOG(ERROR) << "MLU batch memcpy " << operation
+             << " failure recovery queue sync: descriptor_count="
+             << descriptor_count
+             << ", result=" << static_cast<int32_t>(drain_result)
+             << ", error=" << cn_error_text(drain_result);
+  if (drain_result != CN_SUCCESS) {
+    LOG(FATAL) << "Failed to drain MLU batch memcpy queue after submission "
+                  "failure: operation="
+               << operation << ", descriptor_count=" << descriptor_count
+               << ", result=" << static_cast<int32_t>(drain_result)
+               << ", error=" << cn_error_text(drain_result);
+  }
+}
+
 }  // namespace
 
 void MLUBatchMemcpy::init(int32_t device_id) {
@@ -149,6 +167,9 @@ bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
                           Stream* stream,
                           Direction direction,
                           CompletionMode completion_mode) {
+  CNqueue queue = nullptr;
+  bool queue_has_submitted_work = false;
+  const bool h2d = direction == Direction::H2D;
   try {
     if (!valid_inputs(src_tensors, dst_tensors, stream, direction)) {
       return false;
@@ -181,39 +202,32 @@ bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
     size_t attr_index = 0;
     const c10::StreamGuard guard = stream->set_stream_guard();
     const cnrtQueue_t runtime_queue = stream->get_stream()->stream();
-    const CNqueue queue = reinterpret_cast<CNqueue>(runtime_queue);
-    const bool h2d = direction == Direction::H2D;
-    bool submitted = true;
-    size_t failed_offset = 0;
-    size_t failed_count = 0;
-    CNresult submit_result = CN_SUCCESS;
+    queue = reinterpret_cast<CNqueue>(runtime_queue);
     for (size_t offset = 0; offset < count; offset += kMaxBatchCopyCount) {
       const size_t chunk = std::min(kMaxBatchCopyCount, count - offset);
-      submit_result = cnMemcpyBatchAsync(dst_addrs.data() + offset,
-                                         src_addrs.data() + offset,
-                                         byte_counts.data() + offset,
-                                         chunk,
-                                         &attr,
-                                         &attr_index,
-                                         /*numAttrs=*/1,
-                                         queue);
+      const CNresult submit_result =
+          cnMemcpyBatchAsync(dst_addrs.data() + offset,
+                             src_addrs.data() + offset,
+                             byte_counts.data() + offset,
+                             chunk,
+                             &attr,
+                             &attr_index,
+                             /*numAttrs=*/1,
+                             queue);
       if (submit_result != CN_SUCCESS) {
-        submitted = false;
-        failed_offset = offset;
-        failed_count = chunk;
-        break;
+        LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
+                   << " submission failed: chunk_offset=" << offset
+                   << ", chunk_count=" << chunk
+                   << ", result=" << static_cast<int32_t>(submit_result)
+                   << ", error=" << cn_error_text(submit_result);
+        drain_queue_after_failure(queue, direction_name(h2d), count);
+        return false;
       }
+      queue_has_submitted_work = true;
     }
 
-    if (!submitted) {
-      LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
-                 << " submission failed: chunk_offset=" << failed_offset
-                 << ", chunk_count=" << failed_count
-                 << ", result=" << static_cast<int32_t>(submit_result)
-                 << ", error=" << cn_error_text(submit_result);
-    }
-    if (!submitted || completion_mode == CompletionMode::SUBMIT_ONLY) {
-      return submitted;
+    if (completion_mode == CompletionMode::SUBMIT_ONLY) {
+      return true;
     }
 
     const CNresult sync_result = cnQueueSync(queue);
@@ -225,13 +239,14 @@ bool MLUBatchMemcpy::copy(const std::vector<torch::Tensor>& src_tensors,
     }
     return sync_result == CN_SUCCESS;
   } catch (const std::exception& error) {
-    LOG(ERROR) << "MLU batch memcpy "
-               << direction_name(direction == Direction::H2D)
+    LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
                << " raised an exception: " << error.what();
   } catch (...) {
-    LOG(ERROR) << "MLU batch memcpy "
-               << direction_name(direction == Direction::H2D)
+    LOG(ERROR) << "MLU batch memcpy " << direction_name(h2d)
                << " raised an unknown exception.";
+  }
+  if (queue_has_submitted_work) {
+    drain_queue_after_failure(queue, direction_name(h2d), src_tensors.size());
   }
   return false;
 }
