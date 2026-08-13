@@ -971,7 +971,7 @@ void HierarchyBlockManagerPool::transfer_blocks(std::vector<Batch>& batches) {
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
 
 bool HierarchyBlockManagerPool::has_pending_async_block_release() const {
-  if (pending_offload_transfers_.load(std::memory_order_relaxed) > 0) {
+  if (offload_transfers_.has_pending()) {
     return true;
   }
   for (const OffloadBlockPairQueue& queue : offload_block_pair_queues_) {
@@ -1014,9 +1014,6 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
       for (const auto& [type, entry] : host_block_managers_[i]) {
         host_leaves_snapshot.emplace(type, entry.leaf.get());
       }
-      pending_offload_transfers_.fetch_add(1, std::memory_order_relaxed);
-      std::atomic<size_t>* pending_offload_transfers =
-          &pending_offload_transfers_;
       std::shared_ptr<KVTransferTracker::Completion> completion =
           offload_transfers_.track();
       folly::collectAll(
@@ -1026,8 +1023,7 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
                       host_blocks = std::move(dst_blocks),
                       block_types_vec = std::move(block_types),
                       device_block_mgr_ptr = block_managers_[i].get(),
-                      host_leaves = std::move(host_leaves_snapshot),
-                      completion = std::move(completion)](
+                      host_leaves = std::move(host_leaves_snapshot)](
                          std::vector<folly::Try<uint32_t>>&& results) mutable {
             bool copy_ok = true;
             for (auto&& result : results) {
@@ -1054,11 +1050,10 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
             finalize_host_blocks(
                 copy_ok, std::move(host_blocks), block_types_vec, host_leaves);
 
-            completion.reset();
             return 0;
           })
-          .ensure([pending_offload_transfers]() {
-            pending_offload_transfers->fetch_sub(1, std::memory_order_relaxed);
+          .ensure([completion = std::move(completion)]() mutable {
+            completion.reset();
           });
     }
   }

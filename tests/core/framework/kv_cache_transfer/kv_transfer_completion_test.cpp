@@ -102,6 +102,21 @@ TEST(KVTransferTrackerTest, WaitsForEveryTrackedTransfer) {
   EXPECT_EQ(result.wait_for(1s), std::future_status::ready);
 }
 
+TEST(KVTransferTrackerTest, ReportsPendingUntilEveryTransferFinishes) {
+  KVTransferTracker tracker;
+  EXPECT_FALSE(tracker.has_pending());
+
+  std::shared_ptr<KVTransferTracker::Completion> first = tracker.track();
+  std::shared_ptr<KVTransferTracker::Completion> second = tracker.track();
+  EXPECT_TRUE(tracker.has_pending());
+
+  first.reset();
+  EXPECT_TRUE(tracker.has_pending());
+
+  second.reset();
+  EXPECT_FALSE(tracker.has_pending());
+}
+
 TEST(KVTransferTrackerTest, DestructionWaitsForTrackedTransfer) {
   auto tracker = std::make_unique<KVTransferTracker>();
   std::shared_ptr<KVTransferTracker::Completion> completion = tracker->track();

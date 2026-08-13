@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <atomic>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -109,7 +108,6 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   // owned only by the Sequence's Host/device cache states.
   std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;
   std::vector<OffloadBlockPairQueue> offload_block_pair_queues_;
-  std::atomic<size_t> pending_offload_transfers_{0};
 
   std::mutex prefetch_plans_mutex_;
   std::unordered_map<Sequence*, std::shared_ptr<PrefetchPlan>> prefetch_plans_;

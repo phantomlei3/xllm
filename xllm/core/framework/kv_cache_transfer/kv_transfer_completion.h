@@ -82,6 +82,7 @@ class KVTransferTracker final {
   KVTransferTracker& operator=(KVTransferTracker&&) = delete;
 
   std::shared_ptr<Completion> track();
+  bool has_pending() const;
   void wait();
 
  private:
