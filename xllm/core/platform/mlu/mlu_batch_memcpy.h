@@ -33,10 +33,6 @@ class MLUBatchMemcpy final : public BatchMemcpy {
 
   void init(int32_t device_id) override;
 
-  bool copy_h2d(const std::vector<torch::Tensor>& src_tensors,
-                const std::vector<torch::Tensor>& dst_tensors,
-                Stream* stream) override;
-
   bool submit_h2d(const std::vector<torch::Tensor>& src_tensors,
                   const std::vector<torch::Tensor>& dst_tensors,
                   Stream* stream) override;

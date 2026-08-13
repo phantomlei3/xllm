@@ -155,7 +155,7 @@ class MLUBatchMemcpyTest : public ::testing::Test {
     create_host_page_aligned_tensor(
         {count, width}, torch::kUInt8, &restored, &restored_region);
 
-    ASSERT_TRUE(batch_memcpy_->copy_h2d(
+    ASSERT_TRUE(batch_memcpy_->submit_h2d(
         rows(source), rows(device_tensor), stream_.get()));
     ASSERT_TRUE(batch_memcpy_->copy_d2h(
         rows(device_tensor), rows(restored), stream_.get()));
@@ -203,7 +203,8 @@ TEST_F(MLUBatchMemcpyTest, RoundTripSupportsDifferentTensorSizes) {
         torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap())));
   }
 
-  ASSERT_TRUE(batch_memcpy_->copy_h2d(sources, device_tensors, stream_.get()));
+  ASSERT_TRUE(
+      batch_memcpy_->submit_h2d(sources, device_tensors, stream_.get()));
   ASSERT_TRUE(batch_memcpy_->copy_d2h(device_tensors, restored, stream_.get()));
   for (size_t index = 0; index < widths.size(); ++index) {
     EXPECT_TRUE(torch::equal(sources[index], restored[index]));
@@ -320,18 +321,19 @@ TEST_F(MLUBatchMemcpyTest, RejectsInvalidInputs) {
       {2, 4},
       torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
 
-  EXPECT_FALSE(batch_memcpy_->copy_h2d(
+  EXPECT_FALSE(batch_memcpy_->submit_h2d(
       {host[0]}, {device_tensor[0], device_tensor[1]}, stream_.get()));
-  EXPECT_FALSE(batch_memcpy_->copy_h2d(
+  EXPECT_FALSE(batch_memcpy_->submit_h2d(
       {host[0]}, {device_tensor.flatten()}, stream_.get()));
-  EXPECT_FALSE(batch_memcpy_->copy_h2d(
+  EXPECT_FALSE(batch_memcpy_->submit_h2d(
       {host.transpose(0, 1)}, {device_tensor}, stream_.get()));
   EXPECT_FALSE(
-      batch_memcpy_->copy_h2d({device_tensor[0]}, {host[0]}, stream_.get()));
+      batch_memcpy_->submit_h2d({device_tensor[0]}, {host[0]}, stream_.get()));
   EXPECT_FALSE(
       batch_memcpy_->copy_d2h({host[0]}, {device_tensor[0]}, stream_.get()));
-  EXPECT_FALSE(batch_memcpy_->copy_h2d({host[0]}, {device_tensor[0]}, nullptr));
-  EXPECT_FALSE(batch_memcpy_->copy_h2d(
+  EXPECT_FALSE(
+      batch_memcpy_->submit_h2d({host[0]}, {device_tensor[0]}, nullptr));
+  EXPECT_FALSE(batch_memcpy_->submit_h2d(
       {torch::Tensor()}, {device_tensor[0]}, stream_.get()));
 }
 
@@ -352,7 +354,8 @@ TEST_F(MLUBatchMemcpyTest, RejectsStreamFromAnotherDevice) {
                        .device(other_device.unwrap()));
   device_->set_device();
 
-  EXPECT_FALSE(batch_memcpy_->copy_h2d({host}, {other_tensor}, stream_.get()));
+  EXPECT_FALSE(
+      batch_memcpy_->submit_h2d({host}, {other_tensor}, stream_.get()));
 }
 
 }  // namespace

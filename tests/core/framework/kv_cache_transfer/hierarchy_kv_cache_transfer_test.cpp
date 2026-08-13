@@ -92,13 +92,6 @@ class PendingBatchMemcpy final : public BatchMemcpy {
 
   void init(int32_t /*device_id*/) override {}
 
-  bool copy_h2d(const std::vector<torch::Tensor>& /*src_tensors*/,
-                const std::vector<torch::Tensor>& /*dst_tensors*/,
-                Stream* /*stream*/) override {
-    ADD_FAILURE() << "Unexpected synchronous H2D copy.";
-    return false;
-  }
-
   bool submit_h2d(const std::vector<torch::Tensor>& /*src_tensors*/,
                   const std::vector<torch::Tensor>& /*dst_tensors*/,
                   Stream* stream) override {

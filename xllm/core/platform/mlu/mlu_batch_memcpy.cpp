@@ -67,16 +67,6 @@ void MLUBatchMemcpy::init(int32_t device_id) {
   initialized_ = true;
 }
 
-bool MLUBatchMemcpy::copy_h2d(const std::vector<torch::Tensor>& src_tensors,
-                              const std::vector<torch::Tensor>& dst_tensors,
-                              Stream* stream) {
-  return copy(src_tensors,
-              dst_tensors,
-              stream,
-              Direction::H2D,
-              CompletionMode::SYNCHRONIZE);
-}
-
 bool MLUBatchMemcpy::submit_h2d(const std::vector<torch::Tensor>& src_tensors,
                                 const std::vector<torch::Tensor>& dst_tensors,
                                 Stream* stream) {
