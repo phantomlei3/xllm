@@ -117,8 +117,7 @@ void ExpectMluCompressedStateLayout(const std::vector<KVCache>& caches,
   EXPECT_EQ(shape_vec(caches[1].get_compress_state()),
             (std::vector<int64_t>{swa_count, block_size, 4 * head_dim}));
   EXPECT_EQ(shape_vec(caches[1].get_compress_index_state()),
-            (std::vector<int64_t>{swa_count, block_size,
-                                  4 * index_head_dim}));
+            (std::vector<int64_t>{swa_count, block_size, 4 * index_head_dim}));
   EXPECT_TRUE(caches[1].get_compress_state().is_contiguous());
   EXPECT_TRUE(caches[1].get_compress_index_state().is_contiguous());
 
