@@ -661,6 +661,13 @@ const FinalResponse& ResponsesProcessor::timeout() {
   return response_;
 }
 
+const FinalResponse& ResponsesProcessor::fail_request(
+    ErrorCode code,
+    const std::string& message) {
+  fail(code, message);
+  return response_;
+}
+
 const FinalResponse& ResponsesProcessor::cancel() {
   if (response_.status == ResponseStatus::IN_PROGRESS) {
     response_.status = ResponseStatus::CANCELLED;

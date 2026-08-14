@@ -184,6 +184,7 @@ class ResponsesProcessor final {
                model_protocol::ModelOutputParser& parser);
   const FinalResponse& finish();
   const FinalResponse& timeout();
+  const FinalResponse& fail_request(ErrorCode code, const std::string& message);
   const FinalResponse& cancel();
   const FinalResponse& response() const { return response_; }
   std::vector<ResponseEvent> take_events();

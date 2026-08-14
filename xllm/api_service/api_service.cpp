@@ -20,7 +20,10 @@ limitations under the License.
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <atomic>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 
 #include "api_service/chat_json_parser.h"
 #include "api_service/completion_json_parser.h"
@@ -465,6 +468,123 @@ void APIService::ChatCompletionsHttp(
   chat_completions_handler_(done_guard, ctrl, request, response);
 }
 
+namespace {
+
+class ResponsesDisconnectState final {
+ public:
+  void set(std::weak_ptr<ResponsesStreamControl> control) {
+    std::shared_ptr<ResponsesStreamControl> disconnected;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      control_ = std::move(control);
+      if (stopped_) {
+        disconnected = control_.lock();
+      }
+    }
+    if (disconnected != nullptr) {
+      disconnected->disconnect();
+    }
+  }
+
+  void stopped() {
+    std::shared_ptr<ResponsesStreamControl> control;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+      control = control_.lock();
+    }
+    if (control != nullptr) {
+      control->disconnect();
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  std::weak_ptr<ResponsesStreamControl> control_;
+  bool stopped_ = false;
+};
+
+class ResponsesDisconnectClosure final : public google::protobuf::Closure {
+ public:
+  explicit ResponsesDisconnectClosure(
+      std::shared_ptr<ResponsesDisconnectState> state)
+      : state_(std::move(state)) {}
+
+  void Run() override {
+    state_->stopped();
+    delete this;
+  }
+
+ private:
+  std::shared_ptr<ResponsesDisconnectState> state_;
+};
+
+class BrpcResponsesWriter final : public ResponsesStreamWriter {
+ public:
+  BrpcResponsesWriter(brpc::Controller* controller,
+                      std::shared_ptr<ClosureGuard> done_guard)
+      : controller_(controller),
+        done_guard_(std::move(done_guard)),
+        disconnect_state_(std::make_shared<ResponsesDisconnectState>()) {}
+
+  void set_control(std::weak_ptr<ResponsesStreamControl> control) {
+    disconnect_state_->set(std::move(control));
+  }
+
+  bool open() override {
+    controller_->http_response().set_content_type(
+        "text/event-stream; charset=utf-8");
+    controller_->http_response().set_status_code(brpc::HTTP_STATUS_OK);
+    controller_->http_response().SetHeader("Connection", "keep-alive");
+    controller_->http_response().SetHeader("Cache-Control", "no-cache");
+    attachment_ = controller_->CreateProgressiveAttachment();
+    if (attachment_ == nullptr) {
+      writable_.store(false, std::memory_order_relaxed);
+      return false;
+    }
+    attachment_->NotifyOnStopped(
+        new ResponsesDisconnectClosure(disconnect_state_));
+    done_guard_.reset();
+    return true;
+  }
+
+  void write(std::string frame, WriteCompletion completion) override {
+    const int result = attachment_ == nullptr
+                           ? -1
+                           : attachment_->Write(frame.data(), frame.size());
+    if (result != 0) {
+      writable_.store(false, std::memory_order_relaxed);
+    }
+    completion(result == 0);
+  }
+
+  bool writable() const override {
+    return writable_.load(std::memory_order_relaxed);
+  }
+
+  void close() override {
+    writable_.store(false, std::memory_order_relaxed);
+    attachment_.reset();
+  }
+
+  void complete_http() override { done_guard_.reset(); }
+
+ private:
+  brpc::Controller* controller_;
+  std::shared_ptr<ClosureGuard> done_guard_;
+  std::shared_ptr<ResponsesDisconnectState> disconnect_state_;
+  butil::intrusive_ptr<brpc::ProgressiveAttachment> attachment_;
+  std::atomic<bool> writable_{true};
+};
+
+bool requests_stream(const std::string& body) {
+  nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
+  return parsed.is_object() && parsed.contains("stream") &&
+         parsed["stream"].is_boolean() && parsed["stream"].get<bool>();
+}
+
+}  // namespace
+
 void APIService::ResponsesHttp(::google::protobuf::RpcController* controller,
                                const proto::HttpRequest* request,
                                proto::HttpResponse* response,
@@ -500,17 +620,27 @@ void APIService::ResponsesHttp(::google::protobuf::RpcController* controller,
   responses::RequestContext context{
       .request_id = request_id == nullptr ? "" : *request_id,
       .trace_id = trace_id == nullptr ? "" : *trace_id};
-  responses_service_impl_->process_non_stream(
-      body,
-      content_type,
-      std::move(context),
-      [ctrl,
-       done_guard = std::move(done_guard)](ResponsesHttpResult result) mutable {
-        ctrl->http_response().set_status_code(result.status_code);
-        ctrl->http_response().set_content_type("application/json");
-        ctrl->response_attachment().append(result.body.dump());
-        done_guard.reset();
-      });
+  auto complete_json = [ctrl, done_guard](ResponsesHttpResult result) mutable {
+    ctrl->http_response().set_status_code(result.status_code);
+    ctrl->http_response().set_content_type("application/json");
+    ctrl->response_attachment().append(result.body.dump());
+    done_guard.reset();
+  };
+  if (!requests_stream(body)) {
+    responses_service_impl_->process_non_stream(
+        body, content_type, std::move(context), std::move(complete_json));
+    return;
+  }
+  auto writer = std::make_shared<BrpcResponsesWriter>(ctrl, done_guard);
+  std::shared_ptr<ResponsesStreamControl> stream =
+      responses_service_impl_->process_stream(body,
+                                              content_type,
+                                              std::move(context),
+                                              writer,
+                                              std::move(complete_json));
+  if (stream != nullptr) {
+    writer->set_control(stream);
+  }
 }
 
 void APIService::Embeddings(::google::protobuf::RpcController* controller,

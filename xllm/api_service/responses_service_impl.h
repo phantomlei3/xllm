@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "core/framework/request/request_output.h"
 #include "core/model_protocol/profile_registry.h"
@@ -29,6 +30,7 @@ limitations under the License.
 namespace xllm {
 
 class LLMMaster;
+class ThreadPool;
 
 model_protocol::LoadedModelContext inspect_responses_model(
     const std::string& model_id,
@@ -44,6 +46,34 @@ class ResponsesExecutor {
   virtual ~ResponsesExecutor() = default;
   virtual void execute(const responses::PreparedRequest& request,
                        OutputCallback callback) = 0;
+  virtual void cancel(const std::string& /*request_id*/) {}
+  virtual void finish_request(const std::string& /*request_id*/) {}
+};
+
+class ResponsesSerialExecutor {
+ public:
+  virtual ~ResponsesSerialExecutor() = default;
+  virtual void post(std::function<void()> task) = 0;
+};
+
+class ResponsesStreamWriter {
+ public:
+  using WriteCompletion = std::function<void(bool)>;
+
+  virtual ~ResponsesStreamWriter() = default;
+  virtual bool open() = 0;
+  virtual void write(std::string frame, WriteCompletion completion) = 0;
+  virtual bool writable() const = 0;
+  virtual void close() = 0;
+  virtual void complete_http() = 0;
+};
+
+class ResponsesStreamControl {
+ public:
+  virtual ~ResponsesStreamControl() = default;
+  virtual void deadline() = 0;
+  virtual void disconnect() = 0;
+  virtual uint64_t pending_bytes() const = 0;
 };
 
 class LLMMasterResponsesExecutor final : public ResponsesExecutor {
@@ -59,9 +89,12 @@ class LLMMasterResponsesExecutor final : public ResponsesExecutor {
 class ResponsesServiceImpl final {
  public:
   using Completion = std::function<void(ResponsesHttpResult)>;
+  using SerialExecutorFactory =
+      std::function<std::shared_ptr<ResponsesSerialExecutor>()>;
 
   explicit ResponsesServiceImpl(
-      responses::ResponsesLimits limits = responses::ResponsesLimits());
+      responses::ResponsesLimits limits = responses::ResponsesLimits(),
+      SerialExecutorFactory executor_factory = {});
 
   bool add_model(const model_protocol::LoadedModelContext& context,
                  ResponsesExecutor* executor);
@@ -76,6 +109,13 @@ class ResponsesServiceImpl final {
                           responses::RequestContext context,
                           Completion completion) const;
 
+  std::shared_ptr<ResponsesStreamControl> process_stream(
+      const std::string& body,
+      const std::string& content_type,
+      responses::RequestContext context,
+      std::shared_ptr<ResponsesStreamWriter> writer,
+      Completion early_completion) const;
+
  private:
   struct Backend {
     std::shared_ptr<const model_protocol::ModelProtocolProfile> profile;
@@ -87,6 +127,8 @@ class ResponsesServiceImpl final {
   std::unordered_map<std::string, Backend> backends_;
   std::vector<std::unique_ptr<ResponsesExecutor>> owned_executors_;
   std::optional<std::string> deployment_error_;
+  std::shared_ptr<ThreadPool> stream_pool_;
+  SerialExecutorFactory executor_factory_;
 };
 
 }  // namespace xllm
