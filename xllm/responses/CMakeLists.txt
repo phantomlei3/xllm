@@ -9,12 +9,14 @@ cc_library(
     output_processor.h
     request_preparer.h
     responses_limits.h
+    sse_encoder.h
     types.h
   SRCS
     error.cpp
     json_encoder.cpp
     output_processor.cpp
     request_preparer.cpp
+    sse_encoder.cpp
   DEPS
     :xllm_model_protocol
     :xllm_tool_protocol

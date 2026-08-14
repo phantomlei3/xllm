@@ -65,6 +65,16 @@ cc_test(
     responses_fixture_loader
 )
 
+cc_test(
+  NAME
+    responses_sse_encoder_test
+  SRCS
+    sse_encoder_test.cpp
+  DEPS
+    :xllm_responses
+    GTest::gtest_main
+)
+
 target_compile_definitions(
   responses_output_processor_test
   PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"

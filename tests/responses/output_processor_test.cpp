@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/model_protocol/output_parser.h"
 #include "responses/fixture_loader.h"
 #include "responses/json_encoder.h"
+#include "responses/sse_encoder.h"
 
 namespace xllm::responses {
 namespace {
@@ -191,6 +192,22 @@ TEST(ResponsesProcessorTest, MatchesBothModelItemGoldens) {
       EXPECT_EQ(normalized_items(encoded.at("output")),
                 normalized_items(catalog.expected(
                     profile, scenario, testing::ExpectedArtifact::ITEMS)))
+          << profile << "/" << scenario;
+      const std::vector<ResponseEvent> events = processor.take_events();
+      ASSERT_FALSE(events.empty()) << profile << "/" << scenario;
+      for (size_t index = 0; index < events.size(); ++index) {
+        EXPECT_EQ(events[index].sequence_number, index)
+            << profile << "/" << scenario;
+      }
+      const nlohmann::json terminal = encode_event(events.back());
+      EXPECT_EQ(terminal.at("response"), encoded) << profile << "/" << scenario;
+      EXPECT_EQ(
+          terminal.at("type"),
+          catalog
+              .expected(
+                  profile, scenario, testing::ExpectedArtifact::SSE_EVENTS)
+              .back()
+              .at("type"))
           << profile << "/" << scenario;
     }
   }

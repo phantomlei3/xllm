@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -54,6 +55,102 @@ struct FinalResponse {
   std::optional<model_protocol::GenerationUsage> usage;
 };
 
+struct ResponseCreatedEvent {
+  FinalResponse response;
+};
+struct ResponseInProgressEvent {
+  FinalResponse response;
+};
+struct ResponseCompletedEvent {
+  FinalResponse response;
+};
+struct ResponseIncompleteEvent {
+  FinalResponse response;
+};
+struct ResponseFailedEvent {
+  FinalResponse response;
+};
+struct OutputItemAddedEvent {
+  size_t output_index;
+  OutputItem item;
+};
+struct OutputItemDoneEvent {
+  size_t output_index;
+  OutputItem item;
+};
+struct ContentPartAddedEvent {
+  size_t output_index;
+  std::string item_id;
+};
+struct ContentPartDoneEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string text;
+};
+struct OutputTextDeltaEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string delta;
+};
+struct OutputTextDoneEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string text;
+};
+struct ReasoningTextDeltaEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string delta;
+};
+struct ReasoningTextDoneEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string text;
+};
+struct FunctionArgumentsDeltaEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string delta;
+};
+struct FunctionArgumentsDoneEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string arguments;
+};
+struct CustomInputDeltaEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string delta;
+};
+struct CustomInputDoneEvent {
+  size_t output_index;
+  std::string item_id;
+  std::string input;
+};
+
+using ResponseEventData = std::variant<ResponseCreatedEvent,
+                                       ResponseInProgressEvent,
+                                       ResponseCompletedEvent,
+                                       ResponseIncompleteEvent,
+                                       ResponseFailedEvent,
+                                       OutputItemAddedEvent,
+                                       OutputItemDoneEvent,
+                                       ContentPartAddedEvent,
+                                       ContentPartDoneEvent,
+                                       OutputTextDeltaEvent,
+                                       OutputTextDoneEvent,
+                                       ReasoningTextDeltaEvent,
+                                       ReasoningTextDoneEvent,
+                                       FunctionArgumentsDeltaEvent,
+                                       FunctionArgumentsDoneEvent,
+                                       CustomInputDeltaEvent,
+                                       CustomInputDoneEvent>;
+
+struct ResponseEvent {
+  uint64_t sequence_number;
+  ResponseEventData data;
+};
+
 class IdProvider {
  public:
   virtual ~IdProvider() = default;
@@ -89,6 +186,7 @@ class ResponsesProcessor final {
   const FinalResponse& timeout();
   const FinalResponse& cancel();
   const FinalResponse& response() const { return response_; }
+  std::vector<ResponseEvent> take_events();
 
  private:
   enum class ActiveKind : uint8_t {
@@ -124,6 +222,8 @@ class ResponsesProcessor final {
   std::string new_id(std::string_view prefix);
   std::string call_id(const std::optional<std::string>& candidate);
   void reserve_replayed_ids();
+  void emit(ResponseEventData data);
+  void emit_terminal();
 
   ProcessorConfig config_;
   std::unique_ptr<IdProvider> id_provider_;
@@ -136,7 +236,9 @@ class ResponsesProcessor final {
   bool ordinal_initialized_ = false;
   uint64_t last_ordinal_ = 0;
   uint64_t generated_tokens_ = 0;
+  uint64_t next_event_sequence_ = 0;
   std::unordered_set<std::string> ids_;
+  std::vector<ResponseEvent> events_;
 };
 
 }  // namespace xllm::responses

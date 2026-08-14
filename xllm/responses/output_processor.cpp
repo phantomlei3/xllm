@@ -164,7 +164,10 @@ ResponsesProcessor::ResponsesProcessor(ProcessorConfig config,
   response_.reasoning_effort = config_.reasoning_effort;
   if (response_.id.empty()) {
     fail(ErrorCode::GENERATION_FAILED, "could not allocate response ID");
+    return;
   }
+  emit(ResponseCreatedEvent{.response = response_});
+  emit(ResponseInProgressEvent{.response = response_});
 }
 
 bool ResponsesProcessor::consume(const model_protocol::OutputSegment& segment) {
@@ -281,6 +284,8 @@ bool ResponsesProcessor::append_reasoning(
     active_index_ = response_.output.size() - 1;
     active_kind_ = ActiveKind::REASONING;
     phase_ = OutputPhase::REASONING;
+    emit(OutputItemAddedEvent{.output_index = active_index_,
+                              .item = response_.output[active_index_]});
   }
   OutputReasoningItem& item =
       std::get<OutputReasoningItem>(response_.output[active_index_]);
@@ -290,6 +295,9 @@ bool ResponsesProcessor::append_reasoning(
                 "reasoning output exceeds configured limit");
   }
   item.content += segment.text;
+  emit(ReasoningTextDeltaEvent{.output_index = active_index_,
+                               .item_id = item.id,
+                               .delta = segment.text});
   if (segment.incomplete) {
     item.status = ItemStatus::INCOMPLETE;
   }
@@ -314,6 +322,9 @@ bool ResponsesProcessor::append_text(
     active_index_ = response_.output.size() - 1;
     active_kind_ = ActiveKind::TEXT;
     phase_ = OutputPhase::TEXT;
+    emit(OutputItemAddedEvent{.output_index = active_index_,
+                              .item = response_.output[active_index_]});
+    emit(ContentPartAddedEvent{.output_index = active_index_, .item_id = id});
   }
   OutputMessageItem& item =
       std::get<OutputMessageItem>(response_.output[active_index_]);
@@ -323,6 +334,9 @@ bool ResponsesProcessor::append_text(
                 "text output exceeds configured limit");
   }
   item.content += segment.text;
+  emit(OutputTextDeltaEvent{.output_index = active_index_,
+                            .item_id = item.id,
+                            .delta = segment.text});
   if (segment.incomplete) {
     item.status = ItemStatus::INCOMPLETE;
   }
@@ -347,6 +361,8 @@ bool ResponsesProcessor::start_function(
   active_index_ = response_.output.size() - 1;
   active_kind_ = ActiveKind::FUNCTION;
   phase_ = OutputPhase::CALLS;
+  emit(OutputItemAddedEvent{.output_index = active_index_,
+                            .item = response_.output[active_index_]});
   return true;
 }
 
@@ -368,6 +384,9 @@ bool ResponsesProcessor::append_arguments(
                 "function arguments exceed configured limit");
   }
   item.call.arguments += segment.text;
+  emit(FunctionArgumentsDeltaEvent{.output_index = active_index_,
+                                   .item_id = item.id,
+                                   .delta = segment.text});
   return true;
 }
 
@@ -390,6 +409,11 @@ bool ResponsesProcessor::done_function() {
                 "function arguments must be a JSON object");
   }
   item.status = ItemStatus::COMPLETED;
+  emit(FunctionArgumentsDoneEvent{.output_index = active_index_,
+                                  .item_id = item.id,
+                                  .arguments = item.call.arguments});
+  emit(OutputItemDoneEvent{.output_index = active_index_,
+                           .item = response_.output[active_index_]});
   active_kind_ = ActiveKind::NONE;
   return true;
 }
@@ -412,6 +436,8 @@ bool ResponsesProcessor::start_custom(
   active_index_ = response_.output.size() - 1;
   active_kind_ = ActiveKind::CUSTOM;
   phase_ = OutputPhase::CALLS;
+  emit(OutputItemAddedEvent{.output_index = active_index_,
+                            .item = response_.output[active_index_]});
   return true;
 }
 
@@ -432,6 +458,9 @@ bool ResponsesProcessor::append_custom(
                 "custom input exceeds configured limit");
   }
   item.call.input += segment.text;
+  emit(CustomInputDeltaEvent{.output_index = active_index_,
+                             .item_id = item.id,
+                             .delta = segment.text});
   return true;
 }
 
@@ -443,6 +472,11 @@ bool ResponsesProcessor::done_custom() {
   OutputCustomToolCallItem& item =
       std::get<OutputCustomToolCallItem>(response_.output[active_index_]);
   item.status = ItemStatus::COMPLETED;
+  emit(CustomInputDoneEvent{.output_index = active_index_,
+                            .item_id = item.id,
+                            .input = item.call.input});
+  emit(OutputItemDoneEvent{.output_index = active_index_,
+                           .item = response_.output[active_index_]});
   active_kind_ = ActiveKind::NONE;
   return true;
 }
@@ -462,6 +496,11 @@ bool ResponsesProcessor::close_text_item(ActiveKind kind) {
     if (item.status == ItemStatus::IN_PROGRESS) {
       item.status = ItemStatus::COMPLETED;
     }
+    emit(ReasoningTextDoneEvent{.output_index = active_index_,
+                                .item_id = item.id,
+                                .text = item.content});
+    emit(OutputItemDoneEvent{.output_index = active_index_,
+                             .item = response_.output[active_index_]});
     reasoning_closed_ = true;
   } else {
     OutputMessageItem& item =
@@ -469,6 +508,14 @@ bool ResponsesProcessor::close_text_item(ActiveKind kind) {
     if (item.status == ItemStatus::IN_PROGRESS) {
       item.status = ItemStatus::COMPLETED;
     }
+    emit(OutputTextDoneEvent{.output_index = active_index_,
+                             .item_id = item.id,
+                             .text = item.content});
+    emit(ContentPartDoneEvent{.output_index = active_index_,
+                              .item_id = item.id,
+                              .text = item.content});
+    emit(OutputItemDoneEvent{.output_index = active_index_,
+                             .item = response_.output[active_index_]});
     text_closed_ = true;
   }
   active_kind_ = ActiveKind::NONE;
@@ -482,6 +529,7 @@ bool ResponsesProcessor::fail(ErrorCode code, const std::string& message) {
   response_.status = ResponseStatus::FAILED;
   response_.error =
       ResponsesError{.message = message, .type = "server_error", .code = code};
+  emit_terminal();
   return false;
 }
 
@@ -540,6 +588,7 @@ bool ResponsesProcessor::finish_delta(
     mark_incomplete();
     response_.status = ResponseStatus::INCOMPLETE;
     response_.incomplete_reason = "max_output_tokens";
+    emit_terminal();
     return true;
   }
   if (!delta.finished ||
@@ -558,6 +607,7 @@ bool ResponsesProcessor::finish_delta(
     close_text_item(ActiveKind::TEXT);
   }
   response_.status = ResponseStatus::COMPLETED;
+  emit_terminal();
   return true;
 }
 
@@ -616,6 +666,34 @@ const FinalResponse& ResponsesProcessor::cancel() {
     response_.status = ResponseStatus::CANCELLED;
   }
   return response_;
+}
+
+std::vector<ResponseEvent> ResponsesProcessor::take_events() {
+  std::vector<ResponseEvent> events = std::move(events_);
+  events_.clear();
+  return events;
+}
+
+void ResponsesProcessor::emit(ResponseEventData data) {
+  events_.emplace_back(ResponseEvent{.sequence_number = next_event_sequence_++,
+                                     .data = std::move(data)});
+}
+
+void ResponsesProcessor::emit_terminal() {
+  switch (response_.status) {
+    case ResponseStatus::COMPLETED:
+      emit(ResponseCompletedEvent{.response = response_});
+      return;
+    case ResponseStatus::INCOMPLETE:
+      emit(ResponseIncompleteEvent{.response = response_});
+      return;
+    case ResponseStatus::FAILED:
+      emit(ResponseFailedEvent{.response = response_});
+      return;
+    case ResponseStatus::IN_PROGRESS:
+    case ResponseStatus::CANCELLED:
+      return;
+  }
 }
 
 }  // namespace xllm::responses
