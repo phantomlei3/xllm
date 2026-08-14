@@ -52,6 +52,8 @@ cc_library(
     :tokenizer
     :chat_template
     :multimodal
+    :xllm_model_protocol
+    :xllm_tool_protocol
     glog::glog
     absl::strings
     absl::time

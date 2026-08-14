@@ -28,7 +28,9 @@ limitations under the License.
 #include "common/macros.h"
 #include "completion.pb.h"
 #include "core/common/macros.h"
+#include "core/common/tool.h"
 #include "core/common/types.h"
+#include "core/model_protocol/policy.h"
 #include "embedding.pb.h"
 #include "multimodal.pb.h"
 #include "request.h"
@@ -148,6 +150,10 @@ struct RequestParams {
   // JSON-based tools (replacing proto_tools)
   std::vector<xllm::JsonTool> tools;
 
+  std::vector<Tool> protocol_tools;
+
+  std::optional<ToolConversionError> tool_conversion_error;
+
   std::string tool_choice = "auto";
 
   bool offline = false;
@@ -175,6 +181,12 @@ struct RequestParams {
   bool add_special_tokens = false;
 
   nlohmann::json chat_template_kwargs = nlohmann::json::object();
+
+  model_protocol::ThinkingHistoryPolicy thinking_history_policy =
+      model_protocol::ThinkingHistoryPolicy::TEMPLATE_DEFAULT;
+
+  model_protocol::OutputDecodingPolicy output_decoding_policy =
+      model_protocol::OutputDecodingPolicy::VISIBLE_TEXT;
 
   bool is_sample_request = false;
 

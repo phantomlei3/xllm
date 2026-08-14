@@ -293,12 +293,24 @@ nlohmann::json proto_value_to_json(const google::protobuf::Value& pb_value) {
 }
 
 std::vector<xllm::JsonTool> parse_tools_from_proto(
-    const google::protobuf::RepeatedPtrField<proto::Tool>& proto_tools) {
+    const google::protobuf::RepeatedPtrField<proto::Tool>& proto_tools,
+    std::vector<Tool>* protocol_tools,
+    std::optional<ToolConversionError>* conversion_error) {
   std::vector<xllm::JsonTool> tools;
   tools.clear();
   tools.reserve(proto_tools.size());
 
   for (const auto& proto_tool : proto_tools) {
+    ToolConversion conversion = tool_from_proto(proto_tool);
+    if (!conversion.ok()) {
+      *conversion_error = conversion.error();
+      continue;
+    }
+    protocol_tools->emplace_back(*conversion.value());
+    if (!std::holds_alternative<FunctionTool>(*conversion.value())) {
+      continue;
+    }
+
     xllm::JsonTool json_tool;
     json_tool.type = proto_tool.type();
 
@@ -420,11 +432,13 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
 
   // Parse tools from proto request
   if (request.tools_size() > 0) {
+    std::vector<xllm::JsonTool> parsed_tools = parse_tools_from_proto(
+        request.tools(), &params.protocol_tools, &params.tool_conversion_error);
     if (request.has_tool_choice() && request.tool_choice() == "none") {
       // Don't pass tools to model when tool_choice is none
       params.tool_choice = "none";
     } else {
-      params.tools = parse_tools_from_proto(request.tools());
+      params.tools = std::move(parsed_tools);
       params.tool_choice =
           request.has_tool_choice() ? request.tool_choice() : "auto";
     }
@@ -469,6 +483,18 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
   }
 
   init_from_chat_request(*this, request);
+  if (request.has_thinking_history_policy()) {
+    thinking_history_policy =
+        request.thinking_history_policy() == proto::PRESERVE
+            ? model_protocol::ThinkingHistoryPolicy::PRESERVE
+            : model_protocol::ThinkingHistoryPolicy::TEMPLATE_DEFAULT;
+  }
+  if (request.has_output_decoding_policy()) {
+    output_decoding_policy =
+        request.output_decoding_policy() == proto::PROTOCOL_RAW
+            ? model_protocol::OutputDecodingPolicy::PROTOCOL_RAW
+            : model_protocol::OutputDecodingPolicy::VISIBLE_TEXT;
+  }
 }
 
 RequestParams::RequestParams(const proto::MMChatRequest& request,
@@ -574,6 +600,13 @@ RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
 }
 
 bool RequestParams::verify_params(OutputCallback callback) const {
+  if (tool_conversion_error.has_value()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "tool type does not match its payload",
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
   if (n == 0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "n should be greater than 0",

@@ -23,6 +23,7 @@ limitations under the License.
 #include <variant>
 #include <vector>
 
+#include "core/common/tool.h"
 #include "embedding.pb.h"
 
 namespace xllm {
@@ -79,6 +80,7 @@ struct Message {
     } function;
   };
   using ToolCallVec = std::vector<ToolCall>;
+  using ProtocolToolCallVec = std::vector<xllm::ToolCall>;
 
   Message(const std::string& role, const std::string& content)
       : role(role), content(content) {}
@@ -125,6 +127,8 @@ struct Message {
   std::optional<std::string> tool_call_id;
   std::optional<std::string> reasoning_content;
   std::optional<ToolCallVec> tool_calls;
+  std::optional<ProtocolToolCallVec> protocol_tool_calls;
+  ToolOutputKind tool_output_kind = ToolOutputKind::UNSPECIFIED;
 };
 
 using ChatMessages = std::vector<Message>;

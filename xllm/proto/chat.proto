@@ -21,6 +21,22 @@ package xllm.proto;
 import "common.proto";
 import "google/protobuf/struct.proto";
 
+enum ThinkingHistoryPolicy {
+  TEMPLATE_DEFAULT = 0;
+  PRESERVE = 1;
+}
+
+enum OutputDecodingPolicy {
+  VISIBLE_TEXT = 0;
+  PROTOCOL_RAW = 1;
+}
+
+enum ToolOutputType {
+  TOOL_OUTPUT_UNSPECIFIED = 0;
+  FUNCTION_OUTPUT = 1;
+  CUSTOM_OUTPUT = 2;
+}
+
 message ChatMessage {
   // the role of the messages author. One of "system", "user", "assistant".
   optional string role = 1;
@@ -38,10 +54,11 @@ message ChatMessage {
   // FunctionCall function_call = 4;
   repeated ToolCall tool_calls = 4;
   optional string tool_call_id = 5;
+  optional ToolOutputType tool_output_type = 6;
 }
 
 
-// Next Id: 45
+// Next Id: 49
 message ChatRequest {
   // ID of the model to use. You can use the ListModels endpoint to list available models.
   string model = 1;
@@ -173,6 +190,10 @@ message ChatRequest {
   // whether to include stop strings or stop tokens in the output text.
   // default = false
   optional bool include_stop_str_in_output = 46;
+
+  optional ThinkingHistoryPolicy thinking_history_policy = 47;
+
+  optional OutputDecodingPolicy output_decoding_policy = 48;
 }
 
 message ChatLogProbData {

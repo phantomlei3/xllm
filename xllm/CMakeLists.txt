@@ -52,6 +52,7 @@ add_subdirectory(models)
 add_subdirectory(parser)
 add_subdirectory(processors)
 add_subdirectory(proto)
+add_subdirectory(responses)
 add_subdirectory(pybind)
 add_subdirectory(server)
 

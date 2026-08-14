@@ -24,3 +24,15 @@ target_compile_definitions(
   responses_fixture_conformance_test
   PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
+
+cc_test(
+  NAME
+    responses_typed_protocol_test
+  SRCS
+    typed_protocol_test.cpp
+  DEPS
+    :xllm_tool_protocol
+    :xllm_responses
+    GTest::gtest_main
+    proto::xllm_proto
+)

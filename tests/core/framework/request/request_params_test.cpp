@@ -36,6 +36,87 @@ TEST(RequestParamsTest, IncludeStopStringInOutputDefaultsToFalse) {
   EXPECT_FALSE(mm_chat_params.include_stop_str_in_output);
 }
 
+TEST(RequestParamsTest, ChatProtocolPoliciesDefaultToLegacyBehavior) {
+  RequestParams params(proto::ChatRequest(), "", "");
+
+  EXPECT_EQ(params.thinking_history_policy,
+            model_protocol::ThinkingHistoryPolicy::TEMPLATE_DEFAULT);
+  EXPECT_EQ(params.output_decoding_policy,
+            model_protocol::OutputDecodingPolicy::VISIBLE_TEXT);
+}
+
+TEST(RequestParamsTest, ChatProtocolPoliciesPropagateTypedValues) {
+  proto::ChatRequest request;
+  request.set_thinking_history_policy(proto::PRESERVE);
+  request.set_output_decoding_policy(proto::PROTOCOL_RAW);
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.thinking_history_policy,
+            model_protocol::ThinkingHistoryPolicy::PRESERVE);
+  EXPECT_EQ(params.output_decoding_policy,
+            model_protocol::OutputDecodingPolicy::PROTOCOL_RAW);
+}
+
+TEST(RequestParamsTest, ChatFunctionToolKeepsLegacyAndTypedViews) {
+  proto::ChatRequest request;
+  proto::Tool* tool = request.add_tools();
+  tool->set_type("function");
+  tool->mutable_function()->set_name("read_file");
+
+  RequestParams params(request, "", "");
+
+  ASSERT_EQ(params.tools.size(), 1);
+  ASSERT_EQ(params.protocol_tools.size(), 1);
+  EXPECT_EQ(params.tools[0].function.name, "read_file");
+  EXPECT_TRUE(std::holds_alternative<FunctionTool>(params.protocol_tools[0]));
+  EXPECT_FALSE(params.tool_conversion_error.has_value());
+}
+
+TEST(RequestParamsTest, ChatCustomToolUsesTypedViewWithoutFunctionFallback) {
+  proto::ChatRequest request;
+  proto::Tool* tool = request.add_tools();
+  tool->set_type("custom");
+  tool->mutable_custom()->set_name("apply_patch");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_TRUE(params.tools.empty());
+  ASSERT_EQ(params.protocol_tools.size(), 1);
+  EXPECT_TRUE(std::holds_alternative<CustomTool>(params.protocol_tools[0]));
+  EXPECT_FALSE(params.tool_conversion_error.has_value());
+}
+
+TEST(RequestParamsTest, ToolChoiceNoneKeepsTypedDefinitionForProjection) {
+  proto::ChatRequest request;
+  request.set_tool_choice("none");
+  proto::Tool* tool = request.add_tools();
+  tool->set_type("function");
+  tool->mutable_function()->set_name("read_file");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_TRUE(params.tools.empty());
+  ASSERT_EQ(params.protocol_tools.size(), 1);
+  EXPECT_TRUE(std::holds_alternative<FunctionTool>(params.protocol_tools[0]));
+  EXPECT_EQ(params.tool_choice, "none");
+}
+
+TEST(RequestParamsTest, ChatToolTypeMismatchIsRetainedAsValidationError) {
+  proto::ChatRequest request;
+  proto::Tool* tool = request.add_tools();
+  tool->set_type("function");
+  tool->mutable_custom()->set_name("apply_patch");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_TRUE(params.tools.empty());
+  EXPECT_TRUE(params.protocol_tools.empty());
+  ASSERT_TRUE(params.tool_conversion_error.has_value());
+  EXPECT_EQ(*params.tool_conversion_error,
+            ToolConversionError::TYPE_PAYLOAD_MISMATCH);
+}
+
 TEST(RequestParamsTest, IncludeStopStringInOutputIsParsedFromRequests) {
   proto::CompletionRequest completion_request;
   completion_request.set_include_stop_str_in_output(true);

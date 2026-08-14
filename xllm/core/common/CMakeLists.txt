@@ -46,3 +46,15 @@ cc_library(
 
 target_link_libraries(common PRIVATE OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)
 add_dependencies(common brpc-static)
+
+cc_library(
+  NAME
+    xllm_tool_protocol
+  HDRS
+    tool.h
+  SRCS
+    tool.cpp
+  DEPS
+    nlohmann_json::nlohmann_json
+    proto::xllm_proto
+)
