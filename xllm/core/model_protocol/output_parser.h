@@ -31,22 +31,44 @@ enum class OutputSegmentKind : uint8_t {
   REASONING_DONE = 1,
   TEXT_DELTA = 2,
   TEXT_DONE = 3,
-  PARSE_FAILURE = 4,
+  FUNCTION_CALL_START = 4,
+  ARGUMENTS_DELTA = 5,
+  FUNCTION_CALL_DONE = 6,
+  CUSTOM_CALL_START = 7,
+  CUSTOM_INPUT_DELTA = 8,
+  CUSTOM_CALL_DONE = 9,
+  PARSE_FAILURE = 10,
 };
 
 struct OutputSegment {
   OutputSegmentKind kind = OutputSegmentKind::REASONING_DELTA;
   std::string raw;
   std::string text;
+  std::string name;
+  std::optional<std::string> call_id;
   bool incomplete = false;
   std::optional<ParseFailure> failure;
 };
 
 inline bool operator==(const OutputSegment& left, const OutputSegment& right) {
   return left.kind == right.kind && left.raw == right.raw &&
-         left.text == right.text && left.incomplete == right.incomplete &&
+         left.text == right.text && left.name == right.name &&
+         left.call_id == right.call_id && left.incomplete == right.incomplete &&
          left.failure == right.failure;
 }
+
+enum class ToolGrammarDialect : uint8_t {
+  NONE = 0,
+  DEEPSEEK_DSML = 1,
+  GLM_NATIVE = 2,
+};
+
+struct ToolGrammar {
+  ToolGrammarDialect dialect = ToolGrammarDialect::NONE;
+  size_t max_arguments_bytes = 1024 * 1024;
+  size_t max_custom_input_bytes = 4 * 1024 * 1024;
+  size_t max_json_depth = 64;
+};
 
 struct TextReasoningGrammar {
   std::string reasoning_end;
@@ -55,6 +77,7 @@ struct TextReasoningGrammar {
   int32_t text_end_token = 0;
   std::vector<int32_t> reserved_control_tokens;
   size_t max_marker_bytes = 0;
+  ToolGrammar tool;
 };
 
 class ModelOutputParser {

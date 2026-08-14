@@ -128,6 +128,7 @@ std::unique_ptr<ModelOutputParser> DeepseekV4Profile::new_parser() const {
         static_cast<int32_t>(token_id));
   }
   grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
+  grammar.tool.dialect = ToolGrammarDialect::DEEPSEEK_DSML;
   return make_text_reasoning_parser(std::move(grammar));
 }
 

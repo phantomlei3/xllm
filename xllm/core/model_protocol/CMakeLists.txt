@@ -17,4 +17,6 @@ cc_library(
     glm_5_2_profile.cpp
     output_parser.cpp
     profile_registry.cpp
+  DEPS
+    nlohmann_json::nlohmann_json
 )

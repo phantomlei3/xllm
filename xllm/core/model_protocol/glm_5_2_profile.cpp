@@ -139,6 +139,7 @@ std::unique_ptr<ModelOutputParser> Glm52Profile::new_parser() const {
         static_cast<int32_t>(token_id));
   }
   grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
+  grammar.tool.dialect = ToolGrammarDialect::GLM_NATIVE;
   return make_text_reasoning_parser(std::move(grammar));
 }
 
