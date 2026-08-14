@@ -1,0 +1,9 @@
+{
+  "model": "fixture-model",
+  "input": "Return one short fixture sentence.",
+  "stream": false,
+  "store": false,
+  "previous_response_id": null,
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium"}
+}

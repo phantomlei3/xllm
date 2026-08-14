@@ -1,0 +1,17 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fixture","object":"response","status":"in_progress","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"ctc_fixture","type":"custom_tool_call","status":"in_progress","call_id":"call_fixture_patch","name":"apply_patch","input":""}}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","sequence_number":2,"output_index":0,"item_id":"ctc_fixture","delta":"*** Begin Patch\n*** End Patch"}
+
+event: response.custom_tool_call_input.done
+data: {"type":"response.custom_tool_call_input.done","sequence_number":3,"output_index":0,"item_id":"ctc_fixture","input":"*** Begin Patch\n*** End Patch"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"ctc_fixture","type":"custom_tool_call","status":"completed","call_id":"call_fixture_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_fixture","object":"response","status":"completed","output":[{"id":"ctc_fixture","type":"custom_tool_call","status":"completed","call_id":"call_fixture_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}],"parallel_tool_calls":true,"previous_response_id":null,"store":false}}

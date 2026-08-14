@@ -1,0 +1,23 @@
+{
+  "model": "fixture-model",
+  "input": [
+    {"type": "message", "role": "user", "content": "Run the fixture command and change the marker."},
+    {"type": "reasoning", "id": "rs_fixture_function", "summary": [], "content": [{"type": "reasoning_text", "text": "The fixture requires one harmless command."}], "encrypted_content": null},
+    {"type": "function_call", "id": "fc_fixture", "name": "read_fixture", "arguments": "{}", "call_id": "call_fixture_function"},
+    {"type": "function_call_output", "id": "fco_fixture", "call_id": "call_fixture_function", "output": "fixture-function"},
+    {"type": "reasoning", "id": "rs_fixture_patch", "summary": [], "content": [{"type": "reasoning_text", "text": "The command succeeded; apply the requested patch."}], "encrypted_content": null},
+    {"type": "custom_tool_call", "id": "ctc_fixture", "status": "completed", "call_id": "call_fixture_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** Update File: fixture.txt\n@@\n-before\n+after\n*** End Patch"},
+    {"type": "custom_tool_call_output", "id": "ctco_fixture", "call_id": "call_fixture_patch", "output": "Success. Updated fixture.txt."}
+  ],
+  "stream": true,
+  "store": false,
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "fixture-session",
+  "tools": [
+    {"type": "function", "name": "read_fixture", "description": "Read deterministic fixture text.", "strict": false, "parameters": {"type": "object", "properties": {}, "additionalProperties": false}},
+    {"type": "custom", "name": "apply_patch"}
+  ],
+  "tool_choice": "auto"
+}

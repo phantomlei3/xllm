@@ -1,0 +1,17 @@
+{
+  "model": "fixture-model",
+  "input": [
+    {"type": "message", "role": "user", "content": "Run the fixture command."},
+    {"type": "reasoning", "id": "rs_fixture_function", "summary": [], "content": [{"type": "reasoning_text", "text": "The fixture requires one harmless command."}], "encrypted_content": null},
+    {"type": "function_call", "id": "fc_fixture", "name": "read_fixture", "arguments": "{}", "call_id": "call_fixture_function"},
+    {"type": "function_call_output", "id": "fco_fixture", "call_id": "call_fixture_function", "output": "fixture-function"}
+  ],
+  "stream": true,
+  "store": false,
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "fixture-session",
+  "tools": [{"type": "function", "name": "read_fixture", "description": "Read deterministic fixture text.", "strict": false, "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}],
+  "tool_choice": "auto"
+}

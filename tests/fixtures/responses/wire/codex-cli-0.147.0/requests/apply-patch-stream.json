@@ -1,0 +1,12 @@
+{
+  "model": "fixture-model",
+  "input": [{"type": "message", "role": "user", "content": "Change the fixture marker."}],
+  "stream": true,
+  "store": false,
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "fixture-session",
+  "tools": [{"type": "custom", "name": "apply_patch"}],
+  "tool_choice": {"type": "custom", "name": "apply_patch"}
+}

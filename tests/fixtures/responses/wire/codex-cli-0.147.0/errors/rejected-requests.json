@@ -1,0 +1,9 @@
+{
+  "cases": [
+    {"id": "store_true", "request": {"model": "fixture-model", "input": "x", "store": true}, "expected_http_status": 400, "expected_error": {"type": "invalid_request_error", "param": "store", "code": "unsupported_parameter"}},
+    {"id": "previous_response_id", "request": {"model": "fixture-model", "input": "x", "previous_response_id": "resp_old"}, "expected_http_status": 400, "expected_error": {"type": "invalid_request_error", "param": "previous_response_id", "code": "unsupported_parameter"}},
+    {"id": "strict_function", "request": {"model": "fixture-model", "input": "x", "tools": [{"type": "function", "name": "f", "strict": true, "parameters": {"type": "object"}}]}, "expected_http_status": 400, "expected_error": {"type": "invalid_request_error", "param": "tools[0].strict", "code": "unsupported_parameter"}},
+    {"id": "image_content", "request": {"model": "fixture-model", "input": [{"type": "message", "role": "user", "content": [{"type": "input_image", "image_url": "fixture://image"}]}]}, "expected_http_status": 400, "expected_error": {"type": "invalid_request_error", "param": "input[0].content[0].type", "code": "unsupported_content_type"}},
+    {"id": "unknown_custom_tool", "request": {"model": "fixture-model", "input": "x", "tools": [{"type": "custom", "name": "other"}]}, "expected_http_status": 400, "expected_error": {"type": "invalid_request_error", "param": "tools[0].name", "code": "unknown_tool"}}
+  ]
+}

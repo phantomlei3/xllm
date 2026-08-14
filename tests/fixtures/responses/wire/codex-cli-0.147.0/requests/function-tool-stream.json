@@ -1,0 +1,18 @@
+{
+  "model": "fixture-model",
+  "input": [{"type": "message", "role": "user", "content": "Run the fixture command."}],
+  "stream": true,
+  "store": false,
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "include": ["reasoning.encrypted_content"],
+  "prompt_cache_key": "fixture-session",
+  "tools": [{
+    "type": "function",
+    "name": "read_fixture",
+    "description": "Read deterministic fixture text.",
+    "strict": false,
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+  }],
+  "tool_choice": "auto"
+}

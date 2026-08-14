@@ -1,0 +1,15 @@
+{
+  "id": "resp_fixture",
+  "object": "response",
+  "created_at": 0,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "fixture-model",
+  "output": [{"id": "msg_fixture", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "Fixture response.", "annotations": []}]}],
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "reasoning": {"effort": "medium", "summary": null},
+  "store": false,
+  "usage": {"input_tokens": 8, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 3, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 11}
+}

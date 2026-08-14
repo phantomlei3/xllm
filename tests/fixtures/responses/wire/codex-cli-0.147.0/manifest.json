@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "fixture_family": "xllm_responses_wire",
+  "codex_cli_version": "0.147.0",
+  "codex_source_commit": "be6e8eac029b183056b7e4402879f15d2c85f61b",
+  "freeze_date": "2026-08-14",
+  "capture_date": "2026-08-15",
+  "capture_method": "real Codex CLI against a scripted local Responses endpoint; requests minimized after capture",
+  "traffic_coverage": [
+    "plain_text",
+    "function_tool",
+    "apply_patch",
+    "function_tool_output",
+    "custom_tool_output",
+    "reasoning_replay",
+    "non_stream",
+    "stream"
+  ],
+  "redactions": [
+    "authorization headers were never recorded",
+    "system instructions and environment context removed",
+    "session, installation, thread, turn, message, and generated output IDs replaced",
+    "local paths and timestamps removed",
+    "reasoning replaced with synthetic fixture text"
+  ],
+  "fixtures": [
+    {"path": "compatibility-matrix.json", "kind": "contract", "source": "phase 0 specification plus captured Codex deviations"},
+    {"path": "requests/plain-text-nonstream.json", "kind": "request", "source": "normative xLLM profile derived from captured plain-text shape"},
+    {"path": "requests/function-tool-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
+    {"path": "requests/apply-patch-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
+    {"path": "requests/function-tool-output.json", "kind": "request", "source": "sanitized Codex capture request-2"},
+    {"path": "requests/tool-loop-replay.json", "kind": "request", "source": "sanitized Codex capture request-3"},
+    {"path": "expected-responses/plain-text.json", "kind": "expected_response", "source": "normative frozen profile"},
+    {"path": "expected-sse/tool-loop.sse", "kind": "expected_sse", "source": "scripted capture events normalized to frozen profile"},
+    {"path": "errors/rejected-requests.json", "kind": "errors", "source": "normative frozen profile"}
+  ]
+}
