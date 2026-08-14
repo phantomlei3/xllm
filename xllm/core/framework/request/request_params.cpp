@@ -495,6 +495,20 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
             ? model_protocol::OutputDecodingPolicy::PROTOCOL_RAW
             : model_protocol::OutputDecodingPolicy::VISIBLE_TEXT;
   }
+  if (request.has_reasoning_effort()) {
+    reasoning_effort = static_cast<model_protocol::ReasoningEffort>(
+        request.reasoning_effort());
+  }
+  if (request.has_parallel_tool_calls()) {
+    parallel_tool_calls = request.parallel_tool_calls();
+  }
+  if (request.has_protocol_tool_choice()) {
+    protocol_tool_choice.kind = static_cast<model_protocol::ToolChoiceKind>(
+        request.protocol_tool_choice());
+  }
+  if (request.has_protocol_tool_name()) {
+    protocol_tool_choice.name = request.protocol_tool_name();
+  }
 }
 
 RequestParams::RequestParams(const proto::MMChatRequest& request,

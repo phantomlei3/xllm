@@ -52,11 +52,13 @@ struct CustomToolCall {
 using ToolCall = std::variant<FunctionCall, CustomToolCall>;
 
 struct FunctionCallOutput {
+  std::string id;
   std::string call_id;
   std::string output;
 };
 
 struct CustomToolCallOutput {
+  std::string id;
   std::string call_id;
   std::string output;
 };

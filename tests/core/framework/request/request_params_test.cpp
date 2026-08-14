@@ -58,6 +58,28 @@ TEST(RequestParamsTest, ChatProtocolPoliciesPropagateTypedValues) {
             model_protocol::OutputDecodingPolicy::PROTOCOL_RAW);
 }
 
+TEST(RequestParamsTest, ResponsesGenerationIntentPropagatesTypedValues) {
+  proto::ChatRequest request;
+  request.set_max_tokens(77);
+  request.set_temperature(1.0f);
+  request.set_top_p(0.95f);
+  request.set_reasoning_effort(proto::REASONING_HIGH);
+  request.set_parallel_tool_calls(true);
+  request.set_protocol_tool_choice(proto::TOOL_CHOICE_CUSTOM);
+  request.set_protocol_tool_name("apply_patch");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.max_tokens, 77);
+  EXPECT_FLOAT_EQ(params.temperature, 1.0f);
+  EXPECT_FLOAT_EQ(params.top_p, 0.95f);
+  EXPECT_EQ(params.reasoning_effort, model_protocol::ReasoningEffort::HIGH);
+  EXPECT_TRUE(params.parallel_tool_calls);
+  EXPECT_EQ(params.protocol_tool_choice.kind,
+            model_protocol::ToolChoiceKind::CUSTOM);
+  EXPECT_EQ(params.protocol_tool_choice.name, "apply_patch");
+}
+
 TEST(RequestParamsTest, ChatFunctionToolKeepsLegacyAndTypedViews) {
   proto::ChatRequest request;
   proto::Tool* tool = request.add_tools();

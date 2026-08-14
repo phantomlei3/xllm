@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace xllm::model_protocol {
 
@@ -43,6 +44,19 @@ struct SamplingPolicy {
   ReasoningEffort effort = ReasoningEffort::MEDIUM;
   float temperature = 1.0f;
   float top_p = 0.95f;
+};
+
+enum class ToolChoiceKind : uint8_t {
+  NONE = 0,
+  AUTO = 1,
+  REQUIRED = 2,
+  FUNCTION = 3,
+  CUSTOM = 4,
+};
+
+struct ToolChoice {
+  ToolChoiceKind kind = ToolChoiceKind::AUTO;
+  std::string name;
 };
 
 struct TemplatePolicy {

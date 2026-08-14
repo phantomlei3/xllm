@@ -31,6 +31,24 @@ enum OutputDecodingPolicy {
   PROTOCOL_RAW = 1;
 }
 
+enum ReasoningEffort {
+  REASONING_NONE = 0;
+  REASONING_MINIMAL = 1;
+  REASONING_LOW = 2;
+  REASONING_MEDIUM = 3;
+  REASONING_HIGH = 4;
+  REASONING_XHIGH = 5;
+  REASONING_MAX = 6;
+}
+
+enum ProtocolToolChoiceKind {
+  TOOL_CHOICE_NONE = 0;
+  TOOL_CHOICE_AUTO = 1;
+  TOOL_CHOICE_REQUIRED = 2;
+  TOOL_CHOICE_FUNCTION = 3;
+  TOOL_CHOICE_CUSTOM = 4;
+}
+
 enum ToolOutputType {
   TOOL_OUTPUT_UNSPECIFIED = 0;
   FUNCTION_OUTPUT = 1;
@@ -58,7 +76,7 @@ message ChatMessage {
 }
 
 
-// Next Id: 49
+// Next Id: 53
 message ChatRequest {
   // ID of the model to use. You can use the ListModels endpoint to list available models.
   string model = 1;
@@ -194,6 +212,14 @@ message ChatRequest {
   optional ThinkingHistoryPolicy thinking_history_policy = 47;
 
   optional OutputDecodingPolicy output_decoding_policy = 48;
+
+  optional ReasoningEffort reasoning_effort = 49;
+
+  optional bool parallel_tool_calls = 50;
+
+  optional ProtocolToolChoiceKind protocol_tool_choice = 51;
+
+  optional string protocol_tool_name = 52;
 }
 
 message ChatLogProbData {

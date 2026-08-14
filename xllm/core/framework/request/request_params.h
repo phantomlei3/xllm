@@ -188,6 +188,13 @@ struct RequestParams {
   model_protocol::OutputDecodingPolicy output_decoding_policy =
       model_protocol::OutputDecodingPolicy::VISIBLE_TEXT;
 
+  model_protocol::ReasoningEffort reasoning_effort =
+      model_protocol::ReasoningEffort::MEDIUM;
+
+  bool parallel_tool_calls = false;
+
+  model_protocol::ToolChoice protocol_tool_choice;
+
   bool is_sample_request = false;
 
   std::vector<SampleSlot> sample_slots;

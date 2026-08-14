@@ -17,9 +17,12 @@ limitations under the License.
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -111,6 +114,42 @@ bool valid_id(const std::string& id) {
     return std::isalnum(value) != 0 || byte == '_' || byte == '-' ||
            byte == '.';
   });
+}
+
+bool valid_number(const Json& value, float min, float max) {
+  if (!value.is_number()) {
+    return false;
+  }
+  const double number = value.get<double>();
+  return std::isfinite(number) && number >= min && number <= max;
+}
+
+void json_to_value(const Json& json, google::protobuf::Value* value) {
+  if (json.is_null()) {
+    value->set_null_value(google::protobuf::NULL_VALUE);
+  } else if (json.is_boolean()) {
+    value->set_bool_value(json.get<bool>());
+  } else if (json.is_number()) {
+    value->set_number_value(json.get<double>());
+  } else if (json.is_string()) {
+    value->set_string_value(json.get<std::string>());
+  } else if (json.is_array()) {
+    for (const Json& item : json) {
+      json_to_value(item, value->mutable_list_value()->add_values());
+    }
+  } else {
+    for (auto it = json.begin(); it != json.end(); ++it) {
+      json_to_value(
+          it.value(),
+          &(*value->mutable_struct_value()->mutable_fields())[it.key()]);
+    }
+  }
+}
+
+void json_to_struct(const Json& json, google::protobuf::Struct* value) {
+  for (auto it = json.begin(); it != json.end(); ++it) {
+    json_to_value(it.value(), &(*value->mutable_fields())[it.key()]);
+  }
 }
 
 std::optional<ResponsesError> read_text(const Json& value,
@@ -211,7 +250,12 @@ class RequestAssembler final {
                             "store",
                             "previous_response_id",
                             "parallel_tool_calls",
-                            "reasoning"},
+                            "reasoning",
+                            "max_output_tokens",
+                            "temperature",
+                            "top_p",
+                            "tools",
+                            "tool_choice"},
                            "")) {
       return PrepareResult(std::move(*error));
     }
@@ -236,6 +280,9 @@ class RequestAssembler final {
     init_chat(&prepared);
 
     if (std::optional<ResponsesError> error = parse_options(body, &prepared)) {
+      return PrepareResult(std::move(*error));
+    }
+    if (std::optional<ResponsesError> error = parse_tools(body, &prepared)) {
       return PrepareResult(std::move(*error));
     }
     if (body.contains("instructions")) {
@@ -266,7 +313,18 @@ class RequestAssembler final {
   enum class AssistantState : uint8_t {
     NONE = 0,
     REASONING = 1,
-    MESSAGE = 2,
+    CALLS = 2,
+    MESSAGE = 3,
+  };
+
+  enum class CallKind : uint8_t {
+    FUNCTION = 0,
+    CUSTOM = 1,
+  };
+
+  struct CallState {
+    CallKind kind = CallKind::FUNCTION;
+    bool completed = false;
   };
 
   bool model_matches(const std::string& model) const {
@@ -284,6 +342,7 @@ class RequestAssembler final {
     prepared->chat_request.set_thinking_history_policy(proto::PRESERVE);
     prepared->chat_request.set_output_decoding_policy(proto::PROTOCOL_RAW);
     prepared->chat_request.set_request_id(context_.request_id);
+    prepared->chat_request.set_parallel_tool_calls(true);
   }
 
   std::optional<ResponsesError> parse_options(const Json& body,
@@ -319,7 +378,43 @@ class RequestAssembler final {
       }
     }
     if (body.contains("reasoning")) {
-      return parse_reasoning(body["reasoning"], &prepared->options);
+      if (std::optional<ResponsesError> error =
+              parse_reasoning(body["reasoning"], &prepared->options)) {
+        return error;
+      }
+    }
+    if (body.contains("temperature") &&
+        !valid_number(body["temperature"], 0.0f, 2.0f)) {
+      return invalid("temperature", "temperature must be between 0 and 2");
+    }
+    if (body.contains("top_p") && !valid_number(body["top_p"], 0.0f, 1.0f)) {
+      return invalid("top_p", "top_p must be between 0 and 1");
+    }
+    const bool thinking = prepared->options.reasoning_effort !=
+                          model_protocol::ReasoningEffort::NONE;
+    prepared->options.temperature = thinking || !body.contains("temperature")
+                                        ? 1.0f
+                                        : body["temperature"].get<float>();
+    prepared->options.top_p = thinking || !body.contains("top_p")
+                                  ? 0.95f
+                                  : body["top_p"].get<float>();
+    prepared->chat_request.set_temperature(prepared->options.temperature);
+    prepared->chat_request.set_top_p(prepared->options.top_p);
+    prepared->chat_request.set_reasoning_effort(
+        static_cast<proto::ReasoningEffort>(
+            prepared->options.reasoning_effort));
+    if (body.contains("max_output_tokens")) {
+      if (!body["max_output_tokens"].is_number_unsigned() ||
+          body["max_output_tokens"].get<uint64_t>() == 0 ||
+          body["max_output_tokens"].get<uint64_t>() >
+              std::numeric_limits<uint32_t>::max()) {
+        return invalid("max_output_tokens",
+                       "max_output_tokens must be a positive integer");
+      }
+      prepared->options.max_output_tokens =
+          body["max_output_tokens"].get<uint32_t>();
+      prepared->chat_request.set_max_tokens(
+          *prepared->options.max_output_tokens);
     }
     return std::nullopt;
   }
@@ -355,6 +450,200 @@ class RequestAssembler final {
     } else {
       return invalid("reasoning.effort", "unsupported reasoning effort");
     }
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_tools(const Json& body,
+                                            PreparedRequest* prepared) {
+    if (body.contains("tools")) {
+      const Json& tools = body["tools"];
+      if (!tools.is_array()) {
+        return invalid("tools", "tools must be an array");
+      }
+      if (tools.size() > limits_.max_tools) {
+        return make_error(ErrorCode::TOO_MANY_ITEMS, "tools", "too many tools");
+      }
+      for (size_t index = 0; index < tools.size(); ++index) {
+        if (std::optional<ResponsesError> error =
+                parse_tool(tools[index], index, prepared)) {
+          return error;
+        }
+      }
+    }
+    return parse_tool_choice(body, prepared);
+  }
+
+  std::optional<ResponsesError> parse_tool(const Json& tool,
+                                           size_t index,
+                                           PreparedRequest* prepared) {
+    const std::string param = "tools[" + std::to_string(index) + "]";
+    if (!tool.is_object() || !tool.contains("type") ||
+        !tool["type"].is_string()) {
+      return invalid(param + ".type", "tool type is required");
+    }
+    const uint64_t tool_bytes = tool.dump().size();
+    if (tool_bytes > limits_.max_tool_bytes - tool_bytes_) {
+      return make_error(ErrorCode::REQUEST_TOO_LARGE,
+                        "tools",
+                        "tool definitions exceed configured limit");
+    }
+    tool_bytes_ += tool_bytes;
+    const std::string type = tool["type"].get<std::string>();
+    if (type == "function") {
+      return parse_function_tool(tool, param, prepared);
+    }
+    if (type == "custom") {
+      return parse_custom_tool(tool, param, prepared);
+    }
+    return make_error(
+        ErrorCode::UNKNOWN_TOOL, param + ".type", "unsupported tool type");
+  }
+
+  std::optional<ResponsesError> parse_function_tool(const Json& tool,
+                                                    const std::string& param,
+                                                    PreparedRequest* prepared) {
+    if (std::optional<ResponsesError> error = reject_unknown(
+            tool,
+            {"type", "name", "description", "parameters", "strict"},
+            param)) {
+      return error;
+    }
+    if (!tool.contains("name") || !tool["name"].is_string() ||
+        tool["name"].get_ref<const std::string&>().empty()) {
+      return invalid(param + ".name", "function name is required");
+    }
+    const std::string name = tool["name"].get<std::string>();
+    if (!tool_names_.emplace("function:" + name).second) {
+      return invalid(param + ".name", "tool is duplicated");
+    }
+    if (tool.contains("description") && !tool["description"].is_string()) {
+      return invalid(param + ".description", "description must be a string");
+    }
+    if (tool.contains("strict")) {
+      if (!tool["strict"].is_boolean()) {
+        return invalid(param + ".strict", "strict must be a boolean");
+      }
+      if (tool["strict"].get<bool>()) {
+        return unsupported(param + ".strict", "strict tools are unsupported");
+      }
+    }
+    if (!tool.contains("parameters") || !tool["parameters"].is_object()) {
+      return invalid(param + ".parameters",
+                     "function parameters must be an object");
+    }
+    const std::string schema = tool["parameters"].dump();
+    if (schema.size() > limits_.max_function_schema_bytes) {
+      return make_error(ErrorCode::REQUEST_TOO_LARGE,
+                        param + ".parameters",
+                        "function schema exceeds configured limit");
+    }
+    if (exceeds_depth(schema, limits_.max_json_depth)) {
+      return make_error(ErrorCode::MAX_DEPTH_EXCEEDED,
+                        param + ".parameters",
+                        "function schema nesting exceeds configured limit");
+    }
+
+    FunctionTool function{.name = name,
+                          .description = tool.value("description", ""),
+                          .parameters = tool["parameters"]};
+    proto::Tool* proto_tool = prepared->chat_request.add_tools();
+    proto_tool->set_type("function");
+    proto_tool->mutable_function()->set_name(function.name);
+    proto_tool->mutable_function()->set_description(function.description);
+    json_to_struct(function.parameters,
+                   proto_tool->mutable_function()->mutable_parameters());
+    tools_.emplace_back(std::move(function));
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_custom_tool(const Json& tool,
+                                                  const std::string& param,
+                                                  PreparedRequest* prepared) {
+    if (std::optional<ResponsesError> error =
+            reject_unknown(tool, {"type", "name"}, param)) {
+      return error;
+    }
+    if (!tool.contains("name") || !tool["name"].is_string()) {
+      return invalid(param + ".name", "custom tool name is required");
+    }
+    const std::string name = tool["name"].get<std::string>();
+    if (name != "apply_patch") {
+      return make_error(
+          ErrorCode::UNKNOWN_TOOL, param + ".name", "unknown custom tool");
+    }
+    if (!tool_names_.emplace("custom:" + name).second) {
+      return invalid(param + ".name", "tool is duplicated");
+    }
+    proto::Tool* proto_tool = prepared->chat_request.add_tools();
+    proto_tool->set_type("custom");
+    proto_tool->mutable_custom()->set_name(name);
+    tools_.emplace_back(CustomTool{.name = name});
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_tool_choice(const Json& body,
+                                                  PreparedRequest* prepared) {
+    const Json choice = body.value("tool_choice", Json("auto"));
+    if (choice.is_string()) {
+      const std::string value = choice.get<std::string>();
+      if (value != "none" && value != "auto" && value != "required") {
+        return make_error(
+            ErrorCode::UNKNOWN_TOOL, "tool_choice", "unknown tool choice");
+      }
+      if (value == "required" && tools_.empty()) {
+        return invalid("tool_choice", "required needs at least one tool");
+      }
+      if (value == "none") {
+        prepared->options.tool_choice.kind =
+            model_protocol::ToolChoiceKind::NONE;
+        prepared->chat_request.set_protocol_tool_choice(
+            proto::TOOL_CHOICE_NONE);
+      } else if (value == "required") {
+        prepared->options.tool_choice.kind =
+            model_protocol::ToolChoiceKind::REQUIRED;
+        prepared->chat_request.set_protocol_tool_choice(
+            proto::TOOL_CHOICE_REQUIRED);
+      } else {
+        prepared->chat_request.set_protocol_tool_choice(
+            proto::TOOL_CHOICE_AUTO);
+      }
+      prepared->chat_request.set_tool_choice(value);
+      return std::nullopt;
+    }
+    if (!choice.is_object()) {
+      return invalid("tool_choice", "tool_choice must be a string or object");
+    }
+    if (std::optional<ResponsesError> error =
+            reject_unknown(choice, {"type", "name"}, "tool_choice")) {
+      return error;
+    }
+    if (!choice.contains("type") || !choice["type"].is_string() ||
+        !choice.contains("name") || !choice["name"].is_string()) {
+      return invalid("tool_choice", "named tool choice needs type and name");
+    }
+    const std::string type = choice["type"].get<std::string>();
+    const std::string name = choice["name"].get<std::string>();
+    if (type != "function" && type != "custom") {
+      return make_error(
+          ErrorCode::UNKNOWN_TOOL, "tool_choice.type", "unknown tool type");
+    }
+    if (type == "custom" && name != "apply_patch") {
+      return make_error(
+          ErrorCode::UNKNOWN_TOOL, "tool_choice.name", "unknown custom tool");
+    }
+    if (tool_names_.count(type + ":" + name) == 0) {
+      return make_error(
+          ErrorCode::UNKNOWN_TOOL, "tool_choice.name", "tool is not declared");
+    }
+    prepared->options.tool_choice = {
+        .kind = type == "function" ? model_protocol::ToolChoiceKind::FUNCTION
+                                   : model_protocol::ToolChoiceKind::CUSTOM,
+        .name = name};
+    prepared->chat_request.set_protocol_tool_choice(
+        type == "function" ? proto::TOOL_CHOICE_FUNCTION
+                           : proto::TOOL_CHOICE_CUSTOM);
+    prepared->chat_request.set_protocol_tool_name(name);
+    prepared->chat_request.set_tool_choice(choice.dump());
     return std::nullopt;
   }
 
@@ -407,6 +696,18 @@ class RequestAssembler final {
     if (type == "reasoning") {
       return parse_reasoning_item(item, param, prepared);
     }
+    if (type == "function_call") {
+      return parse_function_call(item, param, prepared);
+    }
+    if (type == "custom_tool_call") {
+      return parse_custom_call(item, param, prepared);
+    }
+    if (type == "function_call_output") {
+      return parse_call_output(item, param, CallKind::FUNCTION, prepared);
+    }
+    if (type == "custom_tool_call_output") {
+      return parse_call_output(item, param, CallKind::CUSTOM, prepared);
+    }
     return make_error(ErrorCode::UNSUPPORTED_ITEM_TYPE,
                       param + ".type",
                       "unsupported input item type");
@@ -456,7 +757,8 @@ class RequestAssembler final {
       }
       prepared->canonical_input.emplace_back(
           MessageItem{.id = id, .role = role, .content = content});
-      if (assistant_state_ == AssistantState::REASONING) {
+      if (assistant_state_ == AssistantState::REASONING ||
+          assistant_state_ == AssistantState::CALLS) {
         prepared->chat_request
             .mutable_messages(prepared->chat_request.messages_size() - 1)
             ->set_content(content);
@@ -468,9 +770,293 @@ class RequestAssembler final {
       assistant_state_ = AssistantState::MESSAGE;
       return std::nullopt;
     }
+    if (!pending_calls_.empty()) {
+      return make_error(ErrorCode::INVALID_ITEM_ORDER,
+                        param,
+                        "pending tool calls must be completed first");
+    }
     assistant_state_ = AssistantState::NONE;
     add_message(id, role == "developer" ? "system" : role, content, prepared);
     return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_function_call(const Json& item,
+                                                    const std::string& param,
+                                                    PreparedRequest* prepared) {
+    if (std::optional<ResponsesError> error = reject_unknown(
+            item,
+            {"type", "id", "call_id", "name", "arguments", "status"},
+            param)) {
+      return error;
+    }
+    if (assistant_state_ == AssistantState::MESSAGE) {
+      return make_error(ErrorCode::INVALID_ITEM_ORDER,
+                        param,
+                        "tool calls must precede assistant text");
+    }
+    if (std::optional<ResponsesError> error =
+            validate_call_status(item, param)) {
+      return error;
+    }
+    std::string item_id;
+    if (std::optional<ResponsesError> error =
+            read_id(item, param + ".id", &item_ids_, &item_id)) {
+      return error;
+    }
+    std::string call_id;
+    std::string name;
+    std::string arguments;
+    if (std::optional<ResponsesError> error =
+            read_call_fields(item,
+                             param,
+                             limits_.max_function_args_bytes,
+                             &call_id,
+                             &name,
+                             &arguments)) {
+      return error;
+    }
+    Json parsed_arguments;
+    try {
+      parsed_arguments = Json::parse(arguments);
+    } catch (const Json::exception&) {
+      return make_error(ErrorCode::INVALID_TOOL_ARGUMENTS,
+                        param + ".arguments",
+                        "function arguments must be a JSON object string");
+    }
+    if (!parsed_arguments.is_object()) {
+      return make_error(ErrorCode::INVALID_TOOL_ARGUMENTS,
+                        param + ".arguments",
+                        "function arguments must be a JSON object string");
+    }
+    if (exceeds_depth(arguments, limits_.max_json_depth)) {
+      return make_error(ErrorCode::MAX_DEPTH_EXCEEDED,
+                        param + ".arguments",
+                        "function arguments nesting exceeds configured limit");
+    }
+    if (std::optional<ResponsesError> error =
+            add_call(call_id, CallKind::FUNCTION, param + ".call_id")) {
+      return error;
+    }
+    FunctionCall call{.id = call_id, .name = name, .arguments = arguments};
+    prepared->canonical_input.emplace_back(
+        FunctionCallItem{.id = item_id, .call = call});
+    proto::ToolCall* proto_call = assistant_message(prepared)->add_tool_calls();
+    proto_call->set_id(call_id);
+    proto_call->set_type("function");
+    proto_call->mutable_function()->set_name(name);
+    proto_call->mutable_function()->set_arguments(arguments);
+    assistant_state_ = AssistantState::CALLS;
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_custom_call(const Json& item,
+                                                  const std::string& param,
+                                                  PreparedRequest* prepared) {
+    if (std::optional<ResponsesError> error =
+            reject_unknown(item,
+                           {"type", "id", "call_id", "name", "input", "status"},
+                           param)) {
+      return error;
+    }
+    if (assistant_state_ == AssistantState::MESSAGE) {
+      return make_error(ErrorCode::INVALID_ITEM_ORDER,
+                        param,
+                        "tool calls must precede assistant text");
+    }
+    if (std::optional<ResponsesError> error =
+            validate_call_status(item, param)) {
+      return error;
+    }
+    std::string item_id;
+    if (std::optional<ResponsesError> error =
+            read_id(item, param + ".id", &item_ids_, &item_id)) {
+      return error;
+    }
+    if (!item.contains("name") || !item["name"].is_string() ||
+        item["name"] != "apply_patch") {
+      return make_error(
+          ErrorCode::UNKNOWN_TOOL, param + ".name", "unknown custom tool");
+    }
+    std::string call_id;
+    if (std::optional<ResponsesError> error =
+            required_id(item, param + ".call_id", "call_id", &call_id)) {
+      return error;
+    }
+    if (!item.contains("input")) {
+      return invalid(param + ".input", "custom tool input is required");
+    }
+    std::string input;
+    if (std::optional<ResponsesError> error =
+            read_payload(item["input"],
+                         param + ".input",
+                         limits_.max_custom_payload_bytes,
+                         &input)) {
+      return error;
+    }
+    if (std::optional<ResponsesError> error =
+            add_call(call_id, CallKind::CUSTOM, param + ".call_id")) {
+      return error;
+    }
+    CustomToolCall call{.id = call_id, .name = "apply_patch", .input = input};
+    prepared->canonical_input.emplace_back(
+        CustomToolCallItem{.id = item_id, .call = call});
+    proto::ToolCall* proto_call = assistant_message(prepared)->add_tool_calls();
+    proto_call->set_id(call_id);
+    proto_call->set_type("custom");
+    proto_call->mutable_custom()->set_name("apply_patch");
+    proto_call->mutable_custom()->set_input(input);
+    assistant_state_ = AssistantState::CALLS;
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_call_output(const Json& item,
+                                                  const std::string& param,
+                                                  CallKind kind,
+                                                  PreparedRequest* prepared) {
+    if (std::optional<ResponsesError> error =
+            reject_unknown(item, {"type", "id", "call_id", "output"}, param)) {
+      return error;
+    }
+    std::string item_id;
+    if (std::optional<ResponsesError> error =
+            read_id(item, param + ".id", &item_ids_, &item_id)) {
+      return error;
+    }
+    std::string call_id;
+    if (std::optional<ResponsesError> error =
+            required_id(item, param + ".call_id", "call_id", &call_id)) {
+      return error;
+    }
+    auto call = calls_.find(call_id);
+    if (call == calls_.end()) {
+      return make_error(ErrorCode::UNKNOWN_CALL_ID,
+                        param + ".call_id",
+                        "output references an unknown call ID");
+    }
+    if (call->second.kind != kind) {
+      return make_error(ErrorCode::TOOL_CALL_TYPE_MISMATCH,
+                        param + ".call_id",
+                        "output type does not match its call");
+    }
+    if (call->second.completed) {
+      return make_error(ErrorCode::INVALID_ITEM_ORDER,
+                        param + ".call_id",
+                        "call output is duplicated");
+    }
+    if (!item.contains("output")) {
+      return invalid(param + ".output", "tool output is required");
+    }
+    std::string output;
+    const uint64_t limit = kind == CallKind::FUNCTION
+                               ? limits_.max_tool_bytes
+                               : limits_.max_custom_payload_bytes;
+    if (std::optional<ResponsesError> error =
+            read_payload(item["output"], param + ".output", limit, &output)) {
+      return error;
+    }
+    call->second.completed = true;
+    pending_calls_.erase(call_id);
+    if (kind == CallKind::FUNCTION) {
+      prepared->canonical_input.emplace_back(FunctionCallOutput{
+          .id = item_id, .call_id = call_id, .output = output});
+    } else {
+      prepared->canonical_input.emplace_back(CustomToolCallOutput{
+          .id = item_id, .call_id = call_id, .output = output});
+    }
+    proto::ChatMessage* message = prepared->chat_request.add_messages();
+    message->set_role("tool");
+    message->set_tool_call_id(call_id);
+    message->set_content(output);
+    message->set_tool_output_type(kind == CallKind::FUNCTION
+                                      ? proto::FUNCTION_OUTPUT
+                                      : proto::CUSTOM_OUTPUT);
+    assistant_state_ = AssistantState::NONE;
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> required_id(const Json& item,
+                                            const std::string& param,
+                                            std::string_view field,
+                                            std::string* id) const {
+    if (!item.contains(field) || !item[field].is_string()) {
+      return invalid(param, "call ID is required");
+    }
+    *id = item[field].get<std::string>();
+    if (!valid_id(*id)) {
+      return invalid(param, "call ID is invalid");
+    }
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> validate_call_status(
+      const Json& item,
+      const std::string& param) const {
+    if (!item.contains("status")) {
+      return std::nullopt;
+    }
+    if (!item["status"].is_string() || item["status"] != "completed") {
+      return invalid(param + ".status", "historical call must be completed");
+    }
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> read_call_fields(const Json& item,
+                                                 const std::string& param,
+                                                 uint64_t max_payload_bytes,
+                                                 std::string* call_id,
+                                                 std::string* name,
+                                                 std::string* payload) const {
+    if (std::optional<ResponsesError> error =
+            required_id(item, param + ".call_id", "call_id", call_id)) {
+      return error;
+    }
+    if (!item.contains("name") || !item["name"].is_string() ||
+        item["name"].get_ref<const std::string&>().empty()) {
+      return invalid(param + ".name", "function name is required");
+    }
+    *name = item["name"].get<std::string>();
+    if (!item.contains("arguments")) {
+      return invalid(param + ".arguments", "function arguments are required");
+    }
+    return read_payload(
+        item["arguments"], param + ".arguments", max_payload_bytes, payload);
+  }
+
+  std::optional<ResponsesError> read_payload(const Json& value,
+                                             const std::string& param,
+                                             uint64_t max_bytes,
+                                             std::string* payload) const {
+    if (!value.is_string()) {
+      return invalid(param, "payload must be a string");
+    }
+    *payload = value.get<std::string>();
+    if (payload->size() > max_bytes) {
+      return make_error(ErrorCode::REQUEST_TOO_LARGE,
+                        param,
+                        "payload exceeds configured limit");
+    }
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> add_call(const std::string& call_id,
+                                         CallKind kind,
+                                         const std::string& param) {
+    if (!calls_.emplace(call_id, CallState{.kind = kind}).second) {
+      return make_error(
+          ErrorCode::DUPLICATE_CALL_ID, param, "call ID is duplicated");
+    }
+    pending_calls_.emplace(call_id);
+    return std::nullopt;
+  }
+
+  proto::ChatMessage* assistant_message(PreparedRequest* prepared) const {
+    if (assistant_state_ == AssistantState::NONE) {
+      proto::ChatMessage* message = prepared->chat_request.add_messages();
+      message->set_role("assistant");
+      return message;
+    }
+    return prepared->chat_request.mutable_messages(
+        prepared->chat_request.messages_size() - 1);
   }
 
   std::optional<ResponsesError> parse_reasoning_item(
@@ -541,6 +1127,11 @@ class RequestAssembler final {
   const RequestContext& context_;
   const ResponsesLimits& limits_;
   std::unordered_set<std::string> item_ids_;
+  std::unordered_set<std::string> tool_names_;
+  std::unordered_map<std::string, CallState> calls_;
+  std::unordered_set<std::string> pending_calls_;
+  std::vector<Tool> tools_;
+  uint64_t tool_bytes_ = 0;
   AssistantState assistant_state_ = AssistantState::NONE;
 };
 

@@ -317,5 +317,284 @@ TEST(RequestPreparerTest, ProducesDeterministicRequestAndError) {
   EXPECT_EQ(first_error.error().message, second_error.error().message);
 }
 
+TEST(RequestPreparerTest, PreparesTypedToolsCallsAndOutputs) {
+  PrepareResult result = prepare(R"({
+    "model":"fixture-model",
+    "input":[
+      {"type":"message","role":"user","content":"inspect"},
+      {"type":"reasoning","id":"rs_1","content":"plan"},
+      {"type":"function_call","id":"fc_1","call_id":"call_read","name":"read_file","arguments":"{\"path\":\"a.txt\"}"},
+      {"type":"custom_tool_call","id":"ctc_1","status":"completed","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+      {"type":"function_call_output","id":"fco_1","call_id":"call_read","output":"old"},
+      {"type":"custom_tool_call_output","id":"ctco_1","call_id":"call_patch","output":"Done"},
+      {"type":"message","role":"user","content":"continue"}
+    ],
+    "tools":[
+      {"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}},"strict":false},
+      {"type":"custom","name":"apply_patch"}
+    ],
+    "tool_choice":{"type":"custom","name":"apply_patch"}
+  })");
+
+  ASSERT_TRUE(result.ok()) << result.error().message;
+  const PreparedRequest& prepared = result.value();
+  ASSERT_EQ(prepared.canonical_input.size(), 7);
+  EXPECT_TRUE(
+      std::holds_alternative<FunctionCallItem>(prepared.canonical_input[2]));
+  EXPECT_TRUE(
+      std::holds_alternative<CustomToolCallItem>(prepared.canonical_input[3]));
+  EXPECT_TRUE(
+      std::holds_alternative<FunctionCallOutput>(prepared.canonical_input[4]));
+  EXPECT_TRUE(std::holds_alternative<CustomToolCallOutput>(
+      prepared.canonical_input[5]));
+  EXPECT_EQ(std::get<FunctionCallOutput>(prepared.canonical_input[4]).id,
+            "fco_1");
+  EXPECT_EQ(std::get<CustomToolCallOutput>(prepared.canonical_input[5]).id,
+            "ctco_1");
+  ASSERT_EQ(prepared.chat_request.tools_size(), 2);
+  EXPECT_EQ(prepared.chat_request.tools(0).type(), "function");
+  EXPECT_EQ(prepared.chat_request.tools(1).type(), "custom");
+  EXPECT_EQ(prepared.chat_request.protocol_tool_choice(),
+            proto::TOOL_CHOICE_CUSTOM);
+  EXPECT_EQ(prepared.chat_request.protocol_tool_name(), "apply_patch");
+  ASSERT_EQ(prepared.chat_request.messages_size(), 5);
+  ASSERT_EQ(prepared.chat_request.messages(1).tool_calls_size(), 2);
+  EXPECT_EQ(prepared.chat_request.messages(1).tool_calls(0).type(), "function");
+  EXPECT_EQ(prepared.chat_request.messages(1).tool_calls(1).type(), "custom");
+  EXPECT_EQ(prepared.chat_request.messages(2).tool_output_type(),
+            proto::FUNCTION_OUTPUT);
+  EXPECT_EQ(prepared.chat_request.messages(3).tool_output_type(),
+            proto::CUSTOM_OUTPUT);
+}
+
+TEST(RequestPreparerTest, ValidatesToolDefinitionsChoicesAndLimits) {
+  struct Case {
+    std::string suffix;
+    ErrorCode code;
+    std::string param;
+  };
+  const std::vector<Case> cases = {
+      {R"(,"tools":[{"type":"function","name":"f","parameters":{"type":"object"},"strict":true}]})",
+       ErrorCode::UNSUPPORTED_PARAMETER,
+       "tools[0].strict"},
+      {R"(,"tools":[{"type":"custom","name":"other"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].name"},
+      {R"(,"tools":[{"type":"web_search"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].type"},
+      {R"(,"tools":[{"type":"function","name":"f","parameters":[]}]})",
+       ErrorCode::INVALID_REQUEST,
+       "tools[0].parameters"},
+      {R"(,"tool_choice":"required"})",
+       ErrorCode::INVALID_REQUEST,
+       "tool_choice"},
+      {R"(,"tools":[{"type":"function","name":"f","parameters":{}}],"tool_choice":{"type":"function","name":"missing"}})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tool_choice.name"},
+      {R"(,"tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"function","name":"apply_patch"}})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tool_choice.name"},
+  };
+  for (const Case& test_case : cases) {
+    const std::string body =
+        R"({"model":"fixture-model","input":"x")" + test_case.suffix;
+    expect_error(body, test_case.code, test_case.param);
+  }
+
+  ResponsesLimits tiny;
+  tiny.max_tools = 0;
+  expect_error(
+      R"({"model":"fixture-model","input":"x","tools":[{"type":"custom","name":"apply_patch"}]})",
+      ErrorCode::TOO_MANY_ITEMS,
+      "tools",
+      tiny);
+  tiny = ResponsesLimits();
+  tiny.max_function_schema_bytes = 1;
+  expect_error(
+      R"({"model":"fixture-model","input":"x","tools":[{"type":"function","name":"f","parameters":{}}]})",
+      ErrorCode::REQUEST_TOO_LARGE,
+      "tools[0].parameters",
+      tiny);
+  tiny = ResponsesLimits();
+  tiny.max_tool_bytes = 90;
+  expect_error(
+      R"({"model":"fixture-model","input":"x","tools":[{"type":"function","name":"first","parameters":{}},{"type":"function","name":"second","parameters":{}}]})",
+      ErrorCode::REQUEST_TOO_LARGE,
+      "tools",
+      tiny);
+}
+
+TEST(RequestPreparerTest, AcceptsEverySupportedToolChoice) {
+  const std::vector<std::string> choices = {
+      R"("none")",
+      R"("auto")",
+      R"("required")",
+      R"({"type":"function","name":"read_file"})",
+      R"({"type":"custom","name":"apply_patch"})",
+  };
+  for (const std::string& choice : choices) {
+    PrepareResult result = prepare(
+        R"({"model":"fixture-model","input":"x","tools":[{"type":"function","name":"read_file","parameters":{}},{"type":"custom","name":"apply_patch"}],"tool_choice":)" +
+        choice + "}");
+    EXPECT_TRUE(result.ok()) << result.error().message;
+  }
+}
+
+TEST(RequestPreparerTest, ValidatesCallLinkageAndAssistantGrammar) {
+  struct Case {
+    std::string input;
+    ErrorCode code;
+    std::string param;
+  };
+  const std::vector<Case> cases = {
+      {R"([{"type":"function_call_output","call_id":"missing","output":"x"}])",
+       ErrorCode::UNKNOWN_CALL_ID,
+       "input[0].call_id"},
+      {R"([{"type":"function_call","call_id":"dup","name":"a","arguments":"{}"},{"type":"custom_tool_call","call_id":"dup","name":"apply_patch","input":"p"}])",
+       ErrorCode::DUPLICATE_CALL_ID,
+       "input[1].call_id"},
+      {R"([{"type":"function_call","call_id":"c","name":"a","arguments":"{}"},{"type":"custom_tool_call_output","call_id":"c","output":"x"}])",
+       ErrorCode::TOOL_CALL_TYPE_MISMATCH,
+       "input[1].call_id"},
+      {R"([{"type":"function_call","call_id":"c","name":"a","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"x"},{"type":"function_call_output","call_id":"c","output":"y"}])",
+       ErrorCode::INVALID_ITEM_ORDER,
+       "input[2].call_id"},
+      {R"([{"type":"function_call","call_id":"c","name":"a","arguments":"{}"},{"type":"message","role":"user","content":"too soon"}])",
+       ErrorCode::INVALID_ITEM_ORDER,
+       "input[1]"},
+      {R"([{"type":"function_call","call_id":"c","name":"a","arguments":"[]"}])",
+       ErrorCode::INVALID_TOOL_ARGUMENTS,
+       "input[0].arguments"},
+      {R"([{"type":"message","role":"assistant","content":"done"},{"type":"function_call","call_id":"c","name":"a","arguments":"{}"}])",
+       ErrorCode::INVALID_ITEM_ORDER,
+       "input[1]"},
+      {R"([{"type":"custom_tool_call","status":"in_progress","call_id":"c","name":"apply_patch","input":"p"}])",
+       ErrorCode::INVALID_REQUEST,
+       "input[0].status"},
+  };
+  for (const Case& test_case : cases) {
+    expect_error(R"({"model":"fixture-model","input":)" + test_case.input + "}",
+                 test_case.code,
+                 test_case.param);
+  }
+}
+
+TEST(RequestPreparerTest, CompletesParallelCallsInAnyOutputOrder) {
+  PrepareResult result = prepare(R"({
+    "model":"fixture-model",
+    "input":[
+      {"type":"function_call","call_id":"call_a","name":"a","arguments":"{}"},
+      {"type":"function_call","call_id":"call_b","name":"b","arguments":"{}"},
+      {"type":"function_call_output","call_id":"call_b","output":"b"},
+      {"type":"function_call_output","call_id":"call_a","output":"a"},
+      {"type":"message","role":"user","content":"continue"}
+    ]
+  })");
+
+  ASSERT_TRUE(result.ok()) << result.error().message;
+  ASSERT_EQ(result.value().chat_request.messages_size(), 4);
+  EXPECT_EQ(result.value().chat_request.messages(0).tool_calls(0).id(),
+            "call_a");
+  EXPECT_EQ(result.value().chat_request.messages(0).tool_calls(1).id(),
+            "call_b");
+  EXPECT_EQ(result.value().chat_request.messages(1).tool_call_id(), "call_b");
+  EXPECT_EQ(result.value().chat_request.messages(2).tool_call_id(), "call_a");
+}
+
+TEST(RequestPreparerTest, AcceptsEveryReasoningEffort) {
+  struct Case {
+    std::string effort;
+    proto::ReasoningEffort expected;
+  };
+  const std::vector<Case> cases = {
+      {"none", proto::REASONING_NONE},
+      {"minimal", proto::REASONING_MINIMAL},
+      {"low", proto::REASONING_LOW},
+      {"medium", proto::REASONING_MEDIUM},
+      {"high", proto::REASONING_HIGH},
+      {"xhigh", proto::REASONING_XHIGH},
+      {"max", proto::REASONING_MAX},
+  };
+  for (const Case& test_case : cases) {
+    PrepareResult result = prepare(
+        R"({"model":"fixture-model","input":"x","reasoning":{"effort":")" +
+        test_case.effort + R"("}})");
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(result.value().chat_request.reasoning_effort(),
+              test_case.expected);
+  }
+}
+
+TEST(RequestPreparerTest, AppliesGenerationIntentToRequestParams) {
+  PrepareResult thinking = prepare(R"({
+    "model":"fixture-model","input":"x","reasoning":{"effort":"high"},
+    "temperature":0.2,"top_p":0.3,"max_output_tokens":77,
+    "parallel_tool_calls":true
+  })");
+  ASSERT_TRUE(thinking.ok()) << thinking.error().message;
+  EXPECT_EQ(thinking.value().chat_request.max_tokens(), 77);
+  EXPECT_FLOAT_EQ(thinking.value().chat_request.temperature(), 1.0f);
+  EXPECT_FLOAT_EQ(thinking.value().chat_request.top_p(), 0.95f);
+  EXPECT_EQ(thinking.value().chat_request.reasoning_effort(),
+            proto::REASONING_HIGH);
+  EXPECT_TRUE(thinking.value().chat_request.parallel_tool_calls());
+
+  PrepareResult no_thinking = prepare(R"({
+    "model":"fixture-model","input":"x","reasoning":{"effort":"none"},
+    "temperature":0.2,"top_p":0.3
+  })");
+  ASSERT_TRUE(no_thinking.ok()) << no_thinking.error().message;
+  EXPECT_FLOAT_EQ(no_thinking.value().chat_request.temperature(), 0.2f);
+  EXPECT_FLOAT_EQ(no_thinking.value().chat_request.top_p(), 0.3f);
+
+  const std::vector<std::string> unsupported_fields = {"n",
+                                                       "best_of",
+                                                       "beam_width",
+                                                       "max_tokens",
+                                                       "presence_penalty",
+                                                       "frequency_penalty",
+                                                       "top_k",
+                                                       "repetition_penalty"};
+  for (const std::string& field : unsupported_fields) {
+    expect_error(
+        R"({"model":"fixture-model","input":"x",")" + field + R"(":1})",
+        ErrorCode::UNSUPPORTED_PARAMETER,
+        field);
+  }
+  expect_error(R"({"model":"fixture-model","input":"x","temperature":2.1})",
+               ErrorCode::INVALID_REQUEST,
+               "temperature");
+  expect_error(R"({"model":"fixture-model","input":"x","top_p":-0.1})",
+               ErrorCode::INVALID_REQUEST,
+               "top_p");
+  expect_error(R"({"model":"fixture-model","input":"x","max_output_tokens":0})",
+               ErrorCode::INVALID_REQUEST,
+               "max_output_tokens");
+}
+
+TEST(RequestPreparerTest, EnforcesFunctionAndCustomPayloadLimits) {
+  ResponsesLimits tiny;
+  tiny.max_function_args_bytes = 1;
+  expect_error(
+      R"({"model":"fixture-model","input":[{"type":"function_call","call_id":"c","name":"f","arguments":"{}"}]})",
+      ErrorCode::REQUEST_TOO_LARGE,
+      "input[0].arguments",
+      tiny);
+
+  tiny = ResponsesLimits();
+  tiny.max_custom_payload_bytes = 1;
+  expect_error(
+      R"({"model":"fixture-model","input":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"xx"}]})",
+      ErrorCode::REQUEST_TOO_LARGE,
+      "input[0].input",
+      tiny);
+  expect_error(
+      R"({"model":"fixture-model","input":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"x"},{"type":"custom_tool_call_output","call_id":"c","output":"xx"}]})",
+      ErrorCode::REQUEST_TOO_LARGE,
+      "input[1].output",
+      tiny);
+}
+
 }  // namespace
 }  // namespace xllm::responses

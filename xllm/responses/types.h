@@ -63,8 +63,11 @@ struct ResponsesOptions {
   bool store = false;
   bool parallel_tool_calls = true;
   std::optional<uint32_t> max_output_tokens;
+  float temperature = 1.0f;
+  float top_p = 0.95f;
   model_protocol::ReasoningEffort reasoning_effort =
       model_protocol::ReasoningEffort::MEDIUM;
+  model_protocol::ToolChoice tool_choice;
 };
 
 struct RequestContext {
