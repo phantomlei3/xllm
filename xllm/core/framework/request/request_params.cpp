@@ -495,6 +495,10 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
             ? model_protocol::OutputDecodingPolicy::PROTOCOL_RAW
             : model_protocol::OutputDecodingPolicy::VISIBLE_TEXT;
   }
+  if (output_decoding_policy ==
+      model_protocol::OutputDecodingPolicy::PROTOCOL_RAW) {
+    skip_special_tokens = false;
+  }
   if (request.has_reasoning_effort()) {
     reasoning_effort = static_cast<model_protocol::ReasoningEffort>(
         request.reasoning_effort());

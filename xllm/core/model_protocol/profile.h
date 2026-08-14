@@ -29,14 +29,22 @@ struct ModelProtocolIdentity {
   std::string profile_id;
   std::string canonical_model_id;
   std::vector<std::string> model_aliases;
+  std::string model_type;
+  std::string model_fingerprint;
   std::string tokenizer_id;
+  std::string tokenizer_fingerprint;
+  std::string tokenizer_config_fingerprint;
   std::string template_id;
   std::string template_fingerprint;
 };
 
 struct LoadedModelContext {
   std::string model_id;
+  std::string model_type;
+  std::string model_fingerprint;
   std::string tokenizer_id;
+  std::string tokenizer_fingerprint;
+  std::string tokenizer_config_fingerprint;
   std::string template_id;
   std::string template_fingerprint;
 };
@@ -51,6 +59,7 @@ struct ModelProtocolCapabilities {
 
 struct RawDecodingRequirements {
   OutputDecodingPolicy policy = OutputDecodingPolicy::PROTOCOL_RAW;
+  std::string parser_dialect;
   std::vector<int64_t> preserved_token_ids;
   std::vector<std::string> preserved_token_sequences;
   uint32_t max_marker_bytes = 0;

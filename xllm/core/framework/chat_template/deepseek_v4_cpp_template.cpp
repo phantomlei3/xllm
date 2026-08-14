@@ -312,6 +312,28 @@ std::vector<nlohmann::ordered_json> tool_calls_from_openai_format(
   return out;
 }
 
+std::vector<nlohmann::ordered_json> tool_calls_from_protocol(
+    const Message::ProtocolToolCallVec& tool_calls) {
+  std::vector<nlohmann::ordered_json> result;
+  result.reserve(tool_calls.size());
+  for (const ToolCall& tool_call : tool_calls) {
+    nlohmann::ordered_json item;
+    if (std::holds_alternative<FunctionCall>(tool_call)) {
+      const FunctionCall& call = std::get<FunctionCall>(tool_call);
+      item["id"] = call.id;
+      item["name"] = call.name;
+      item["arguments"] = call.arguments;
+    } else {
+      const CustomToolCall& call = std::get<CustomToolCall>(tool_call);
+      item["id"] = call.id;
+      item["name"] = call.name;
+      item["arguments"] = {{"patch", call.input}};
+    }
+    result.emplace_back(std::move(item));
+  }
+  return result;
+}
+
 std::string encode_arguments_to_dsml(const nlohmann::ordered_json& tool_call) {
   std::ostringstream oss;
   nlohmann::ordered_json arguments = nlohmann::json::object();
@@ -546,7 +568,8 @@ nlohmann::ordered_json drop_thinking_messages(
 
 nlohmann::ordered_json normalize_messages(
     const ChatMessages& messages,
-    const std::vector<xllm::JsonTool>& tools) {
+    const std::vector<xllm::JsonTool>& tools,
+    const std::vector<xllm::Tool>& protocol_tools) {
   nlohmann::ordered_json out = nlohmann::json::array();
   for (const Message& message : messages) {
     nlohmann::ordered_json item;
@@ -555,7 +578,10 @@ nlohmann::ordered_json normalize_messages(
     if (message.reasoning_content.has_value()) {
       item["reasoning"] = message.reasoning_content.value();
     }
-    if (message.tool_calls.has_value()) {
+    if (message.protocol_tool_calls.has_value()) {
+      item["tool_calls"] =
+          tool_calls_from_protocol(message.protocol_tool_calls.value());
+    } else if (message.tool_calls.has_value()) {
       item["tool_calls"] =
           tool_calls_from_openai_format(message.tool_calls.value());
     }
@@ -564,7 +590,35 @@ nlohmann::ordered_json normalize_messages(
     }
     out.emplace_back(std::move(item));
   }
-  if (!tools.empty()) {
+  if (!protocol_tools.empty()) {
+    nlohmann::ordered_json tools_json = nlohmann::json::array();
+    for (const xllm::Tool& tool : protocol_tools) {
+      nlohmann::ordered_json openai_tool;
+      openai_tool["type"] = "function";
+      nlohmann::ordered_json function;
+      if (std::holds_alternative<FunctionTool>(tool)) {
+        const FunctionTool& value = std::get<FunctionTool>(tool);
+        function["name"] = value.name;
+        function["description"] = value.description;
+        function["parameters"] = value.parameters;
+      } else {
+        const CustomTool& value = std::get<CustomTool>(tool);
+        function["name"] = value.name;
+        function["description"] =
+            "Apply a patch. Put the complete patch text in patch.";
+        function["parameters"] = {
+            {"properties", {{"patch", {{"type", "string"}}}}},
+            {"required", {"patch"}},
+            {"type", "object"}};
+      }
+      openai_tool["function"] = std::move(function);
+      tools_json.emplace_back(std::move(openai_tool));
+    }
+    nlohmann::ordered_json sys_msg;
+    sys_msg["role"] = kRoleSystem;
+    sys_msg["tools"] = std::move(tools_json);
+    out.insert(out.begin(), std::move(sys_msg));
+  } else if (!tools.empty()) {
     nlohmann::ordered_json tools_json = nlohmann::json::array();
     for (const xllm::JsonTool& tool : tools) {
       nlohmann::ordered_json openai_tool;
@@ -588,6 +642,7 @@ std::string render_message(const nlohmann::ordered_json& messages,
                            int32_t index,
                            const std::string& thinking_mode,
                            bool drop_thinking,
+                           bool preserve_history,
                            const std::string& reasoning_effort) {
   if (index < 0 || index >= static_cast<int32_t>(messages.size())) {
     LOG(FATAL) << "Message index out of range";
@@ -693,8 +748,11 @@ std::string render_message(const nlohmann::ordered_json& messages,
 
     bool prev_has_task = index - 1 >= 0 && messages[index - 1].contains("task");
 
-    if (thinking_mode == kThinkingModeThinking && !prev_has_task) {
-      if (!drop_thinking || index > last_user_idx) {
+    if (!prev_has_task) {
+      if (preserve_history && !reasoning.empty()) {
+        thinking_part = reasoning + kThinkingEndToken;
+      } else if (thinking_mode == kThinkingModeThinking &&
+                 (!drop_thinking || index > last_user_idx)) {
         thinking_part = reasoning + kThinkingEndToken;
       }
     }
@@ -737,7 +795,12 @@ std::string render_message(const nlohmann::ordered_json& messages,
     }
   } else if (role == kRoleUser || role == kRoleDeveloper) {
     prompt += kAssistantSpToken;
-    if (!drop_thinking && thinking_mode == kThinkingModeThinking) {
+    const bool next_has_reasoning =
+        preserve_history && index + 1 < static_cast<int32_t>(messages.size()) &&
+        messages[index + 1].value("role", "") == kRoleAssistant &&
+        !messages[index + 1].value("reasoning", "").empty();
+    if (next_has_reasoning ||
+        (!drop_thinking && thinking_mode == kThinkingModeThinking)) {
       prompt += kThinkingStartToken;
     } else if (drop_thinking && thinking_mode == kThinkingModeThinking &&
                index >= last_user_idx) {
@@ -772,7 +835,7 @@ std::optional<std::string> DeepseekV4CppTemplate::apply(
     const nlohmann::ordered_json& chat_template_kwargs) const {
   try {
     nlohmann::ordered_json normalized =
-        normalize_messages(messages, json_tools);
+        normalize_messages(messages, json_tools, /*protocol_tools=*/{});
     std::string thinking_mode = get_thinking_mode(chat_template_kwargs);
     std::string reasoning_effort =
         resolve_reasoning_effort(get_reasoning_effort(chat_template_kwargs));
@@ -808,13 +871,90 @@ std::optional<std::string> DeepseekV4CppTemplate::apply(
 
     for (int32_t idx = 0; idx < static_cast<int32_t>(normalized.size());
          ++idx) {
-      prompt += render_message(
-          normalized, idx, thinking_mode, drop_thinking, reasoning_effort);
+      prompt += render_message(normalized,
+                               idx,
+                               thinking_mode,
+                               drop_thinking,
+                               /*preserve_history=*/false,
+                               reasoning_effort);
     }
     return prompt;
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to apply DeepSeek V4 native "
                << "template: " << e.what();
+    return std::nullopt;
+  }
+}
+
+std::optional<std::string> DeepseekV4CppTemplate::apply(
+    const ChatMessages& messages,
+    const std::vector<xllm::JsonTool>& json_tools,
+    const std::vector<xllm::Tool>& protocol_tools,
+    const model_protocol::TemplatePolicy& template_policy,
+    model_protocol::ReasoningEffort reasoning_effort,
+    const model_protocol::ToolChoice& tool_choice,
+    const nlohmann::ordered_json& chat_template_kwargs) const {
+  try {
+    std::vector<xllm::Tool> selected_tools = protocol_tools;
+    std::vector<xllm::JsonTool> selected_json_tools = json_tools;
+    if (tool_choice.kind == model_protocol::ToolChoiceKind::NONE) {
+      selected_tools.clear();
+      selected_json_tools.clear();
+    } else if (tool_choice.kind == model_protocol::ToolChoiceKind::FUNCTION ||
+               tool_choice.kind == model_protocol::ToolChoiceKind::CUSTOM) {
+      std::erase_if(selected_tools, [&tool_choice](const xllm::Tool& tool) {
+        if (std::holds_alternative<FunctionTool>(tool)) {
+          return std::get<FunctionTool>(tool).name != tool_choice.name;
+        }
+        return std::get<CustomTool>(tool).name != tool_choice.name;
+      });
+    }
+    if (!protocol_tools.empty()) {
+      selected_json_tools.clear();
+    }
+
+    nlohmann::ordered_json normalized =
+        normalize_messages(messages, selected_json_tools, selected_tools);
+    const bool preserve_history =
+        template_policy.thinking_history ==
+        model_protocol::ThinkingHistoryPolicy::PRESERVE;
+    const std::string thinking_mode =
+        reasoning_effort == model_protocol::ReasoningEffort::NONE
+            ? kThinkingModeChat
+            : kThinkingModeThinking;
+    const std::string effort =
+        reasoning_effort == model_protocol::ReasoningEffort::MAX
+            ? kReasoningEffortMaxTier
+        : reasoning_effort == model_protocol::ReasoningEffort::HIGH
+            ? kReasoningEffortHighTier
+            : kReasoningEffortLowTier;
+
+    normalized = merge_tool_messages(normalized);
+    normalized = sort_tool_results_by_call_order(normalized);
+    bool drop_thinking = false;
+    if (!normalized.empty()) {
+      const std::string last_role = normalized.back().value("role", "");
+      drop_thinking = last_role == kRoleUser && !preserve_history;
+    }
+    if (thinking_mode == kThinkingModeThinking && drop_thinking) {
+      normalized = drop_thinking_messages(normalized);
+    }
+
+    std::string prompt =
+        args_.bos_token().empty() ? std::string(kBosToken) : args_.bos_token();
+    for (int32_t idx = 0; idx < static_cast<int32_t>(normalized.size());
+         ++idx) {
+      prompt += render_message(normalized,
+                               idx,
+                               thinking_mode,
+                               drop_thinking,
+                               preserve_history,
+                               effort);
+    }
+    return prompt;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to apply DeepSeek V4 Responses template: "
+               << e.what();
     return std::nullopt;
   }
 }

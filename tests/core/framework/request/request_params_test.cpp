@@ -56,6 +56,17 @@ TEST(RequestParamsTest, ChatProtocolPoliciesPropagateTypedValues) {
             model_protocol::ThinkingHistoryPolicy::PRESERVE);
   EXPECT_EQ(params.output_decoding_policy,
             model_protocol::OutputDecodingPolicy::PROTOCOL_RAW);
+  EXPECT_FALSE(params.skip_special_tokens);
+}
+
+TEST(RequestParamsTest, RawPolicyCannotBeOverriddenByDecodeFlag) {
+  proto::ChatRequest request;
+  request.set_skip_special_tokens(true);
+  request.set_output_decoding_policy(proto::PROTOCOL_RAW);
+
+  RequestParams params(request, "", "");
+
+  EXPECT_FALSE(params.skip_special_tokens);
 }
 
 TEST(RequestParamsTest, ResponsesGenerationIntentPropagatesTypedValues) {

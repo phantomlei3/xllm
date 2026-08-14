@@ -543,7 +543,14 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   Timer timer;
 
   std::optional<std::string> prompt;
-  prompt = chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
+  prompt =
+      chat_template_->apply(messages,
+                            sp.tools,
+                            sp.protocol_tools,
+                            {.thinking_history = sp.thinking_history_policy},
+                            sp.reasoning_effort,
+                            sp.protocol_tool_choice,
+                            sp.chat_template_kwargs);
   if (!prompt.has_value()) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Failed to construct prompt from messages",

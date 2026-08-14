@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include "core/model_protocol/policy.h"
+
 namespace xllm {
 namespace {
 
@@ -222,6 +224,131 @@ TEST(DeepseekV4CppTemplate, ToolsKeepHistoricalReasoning) {
   ASSERT_TRUE(prompt.has_value());
 
   EXPECT_NE(prompt->find("historical reasoning</think>"), std::string::npos);
+}
+
+TEST(DeepseekV4CppTemplate, PreserveKeepsReasoningWhenCurrentEffortIsNone) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "First question.");
+  Message first("assistant", "First answer.");
+  first.reasoning_content = "First private reasoning.";
+  messages.emplace_back(std::move(first));
+  messages.emplace_back("user", "Second question.");
+  Message second("assistant", "Second answer.");
+  second.reasoning_content = "Second private reasoning.";
+  messages.emplace_back(std::move(second));
+  messages.emplace_back("user", "Final question.");
+
+  nlohmann::ordered_json kwargs = {{"drop_thinking", true},
+                                   {"reasoning_effort", "max"}};
+  auto prompt = encoder.apply(
+      messages,
+      /*json_tools=*/{},
+      /*protocol_tools=*/{},
+      {.thinking_history = model_protocol::ThinkingHistoryPolicy::PRESERVE},
+      model_protocol::ReasoningEffort::NONE,
+      model_protocol::ToolChoice{},
+      kwargs);
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_EQ(*prompt,
+            "<｜begin▁of▁sentence｜><｜User｜>First question."
+            "<｜Assistant｜><think>First private reasoning.</think>"
+            "First answer.<｜end▁of▁sentence｜><｜User｜>Second question."
+            "<｜Assistant｜><think>Second private reasoning.</think>"
+            "Second answer.<｜end▁of▁sentence｜><｜User｜>Final question."
+            "<｜Assistant｜></think>");
+}
+
+TEST(DeepseekV4CppTemplate, RendersTypedApplyPatchLoop) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "Patch the file.");
+  Message assistant("assistant", "");
+  assistant.reasoning_content = "I will apply the requested patch.";
+  assistant.protocol_tool_calls = Message::ProtocolToolCallVec{
+      CustomToolCall{.id = "call_patch_fixture",
+                     .name = "apply_patch",
+                     .input = "*** Begin Patch\n*** End Patch\n"}};
+  messages.emplace_back(std::move(assistant));
+  Message output("tool", "Done!");
+  output.tool_call_id = "call_patch_fixture";
+  output.tool_output_kind = ToolOutputKind::CUSTOM;
+  messages.emplace_back(std::move(output));
+
+  std::vector<Tool> tools = {CustomTool{.name = "apply_patch"}};
+  auto prompt = encoder.apply(
+      messages,
+      /*json_tools=*/{},
+      tools,
+      {.thinking_history = model_protocol::ThinkingHistoryPolicy::PRESERVE},
+      model_protocol::ReasoningEffort::LOW,
+      {.kind = model_protocol::ToolChoiceKind::CUSTOM, .name = "apply_patch"},
+      /*chat_template_kwargs=*/{{"drop_thinking", true}});
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_NE(
+      prompt->find(
+          R"({"name":"apply_patch","description":"Apply a patch. Put the complete patch text in patch.","parameters":{"properties":{"patch":{"type":"string"}},"required":["patch"],"type":"object"}})"),
+      std::string::npos);
+  EXPECT_NE(prompt->find("<｜DSML｜invoke name=\"apply_patch\">"),
+            std::string::npos);
+  EXPECT_NE(prompt->find("<｜DSML｜parameter name=\"patch\" string=\"true\">"
+                         "*** Begin Patch\n*** End Patch\n"
+                         "</｜DSML｜parameter>"),
+            std::string::npos);
+  EXPECT_NE(prompt->find("<tool_result>Done!</tool_result>"),
+            std::string::npos);
+}
+
+TEST(DeepseekV4CppTemplate, RendersParallelTypedFunctionCalls) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "Run both.");
+  Message assistant("assistant", "");
+  assistant.protocol_tool_calls = Message::ProtocolToolCallVec{
+      FunctionCall{.id = "call_a", .name = "first", .arguments = "{}"},
+      FunctionCall{.id = "call_b", .name = "second", .arguments = "{}"}};
+  messages.emplace_back(std::move(assistant));
+
+  std::vector<Tool> tools = {
+      FunctionTool{.name = "first", .parameters = nlohmann::json::object()},
+      FunctionTool{.name = "second", .parameters = nlohmann::json::object()}};
+  auto prompt = encoder.apply(
+      messages,
+      /*json_tools=*/{},
+      tools,
+      {.thinking_history = model_protocol::ThinkingHistoryPolicy::PRESERVE},
+      model_protocol::ReasoningEffort::LOW,
+      {.kind = model_protocol::ToolChoiceKind::REQUIRED},
+      /*chat_template_kwargs=*/{});
+  ASSERT_TRUE(prompt.has_value());
+
+  const size_t first = prompt->find("<｜DSML｜invoke name=\"first\">");
+  const size_t second = prompt->find("<｜DSML｜invoke name=\"second\">");
+  ASSERT_NE(first, std::string::npos);
+  ASSERT_NE(second, std::string::npos);
+  EXPECT_LT(first, second);
+}
+
+TEST(DeepseekV4CppTemplate, TemplateDefaultStillDropsHistoricalReasoning) {
+  auto encoder = make_encoder();
+
+  ChatMessages messages;
+  messages.emplace_back("user", "First question.");
+  Message assistant("assistant", "First answer.");
+  assistant.reasoning_content = "private marker";
+  messages.emplace_back(std::move(assistant));
+  messages.emplace_back("user", "Final question.");
+
+  nlohmann::ordered_json kwargs = {{"thinking", true}};
+  auto prompt = encoder.apply(messages, /*json_tools=*/{}, kwargs);
+  ASSERT_TRUE(prompt.has_value());
+
+  EXPECT_EQ(prompt->find("private marker"), std::string::npos);
 }
 
 TEST(DeepseekV4CppTemplate, LatestReminderUsesDedicatedToken) {

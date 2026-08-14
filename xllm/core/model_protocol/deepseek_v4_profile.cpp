@@ -1,0 +1,129 @@
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "core/model_protocol/deepseek_v4_profile.h"
+
+#include <memory>
+
+namespace xllm::model_protocol {
+namespace {
+
+class DeepseekV4OutputParser final : public ModelOutputParser {};
+
+ReasoningEffort map_effort(ReasoningEffort effort) {
+  switch (effort) {
+    case ReasoningEffort::NONE:
+      return ReasoningEffort::NONE;
+    case ReasoningEffort::MINIMAL:
+    case ReasoningEffort::LOW:
+    case ReasoningEffort::MEDIUM:
+      return ReasoningEffort::LOW;
+    case ReasoningEffort::HIGH:
+    case ReasoningEffort::XHIGH:
+      return ReasoningEffort::HIGH;
+    case ReasoningEffort::MAX:
+      return ReasoningEffort::MAX;
+  }
+  return ReasoningEffort::HIGH;
+}
+
+}  // namespace
+
+DeepseekV4Profile::DeepseekV4Profile()
+    : identity_{.profile_id = "deepseek_v4_responses",
+                .canonical_model_id = "deepseek-v4",
+                .model_aliases =
+                    {"/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa"},
+                .model_type = "deepseek_v4",
+                .model_fingerprint =
+                    "sha256:"
+                    "333f773ad8f613d632293ad4da456df7620074f905705c0e5270b42b40"
+                    "31c9a4",
+                .tokenizer_id = "/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa",
+                .tokenizer_fingerprint =
+                    "sha256:"
+                    "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c"
+                    "8633cf",
+                .tokenizer_config_fingerprint =
+                    "sha256:"
+                    "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f5"
+                    "0d8547",
+                .template_id =
+                    "xllm/core/framework/chat_template/"
+                    "deepseek_v4_cpp_template.cpp",
+                .template_fingerprint =
+                    "sha256:"
+                    "7f48dc5b255443128e84bd6266c0802cff6bd538db9827f877852a3586"
+                    "c9b16f"},
+      capabilities_{.preserves_reasoning = true,
+                    .supports_function_tools = true,
+                    .supports_apply_patch = true,
+                    .supports_reasoning_stream = true,
+                    .supports_raw_decode = true},
+      raw_decoding_{
+          .policy = OutputDecodingPolicy::PROTOCOL_RAW,
+          .parser_dialect = "deepseek_v4_dsml",
+          .preserved_token_ids = {0, 1, 128803, 128804, 128821, 128822, 128825},
+          .preserved_token_sequences = {"</think>",
+                                        "<｜DSML｜tool_calls>",
+                                        "</｜DSML｜tool_calls>",
+                                        "<｜DSML｜invoke name=\"",
+                                        "<｜DSML｜parameter name=\"",
+                                        "<｜end▁of▁sentence｜>"},
+          .max_marker_bytes = 23} {}
+
+const ModelProtocolIdentity& DeepseekV4Profile::identity() const {
+  return identity_;
+}
+
+const ModelProtocolCapabilities& DeepseekV4Profile::capabilities() const {
+  return capabilities_;
+}
+
+const RawDecodingRequirements& DeepseekV4Profile::raw_decoding() const {
+  return raw_decoding_;
+}
+
+ReasoningEffort DeepseekV4Profile::default_effort() const {
+  return ReasoningEffort::MEDIUM;
+}
+
+SamplingPolicy DeepseekV4Profile::resolve_sampling(ReasoningEffort effort,
+                                                   float temperature,
+                                                   float top_p) const {
+  const ReasoningEffort mapped_effort = map_effort(effort);
+  if (mapped_effort != ReasoningEffort::NONE) {
+    return {.effort = mapped_effort, .temperature = 1.0f, .top_p = 0.95f};
+  }
+  return {.effort = mapped_effort, .temperature = temperature, .top_p = top_p};
+}
+
+TemplatePolicy DeepseekV4Profile::resolve_template(
+    ThinkingHistoryPolicy thinking) const {
+  if (thinking == ThinkingHistoryPolicy::PRESERVE) {
+    return {.thinking_history = thinking, .drop_thinking = false};
+  }
+  return {.thinking_history = thinking};
+}
+
+std::unique_ptr<ModelOutputParser> DeepseekV4Profile::new_parser() const {
+  return std::make_unique<DeepseekV4OutputParser>();
+}
+
+std::shared_ptr<const ModelProtocolProfile> make_deepseek_v4_profile() {
+  return std::make_shared<DeepseekV4Profile>();
+}
+
+}  // namespace xllm::model_protocol

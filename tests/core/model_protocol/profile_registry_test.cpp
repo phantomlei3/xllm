@@ -20,6 +20,8 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "core/model_protocol/deepseek_v4_profile.h"
+
 namespace xllm::model_protocol {
 namespace {
 
@@ -31,7 +33,11 @@ class FakeProfile final : public ModelProtocolProfile {
       : identity_{.profile_id = "fake_responses",
                   .canonical_model_id = "fake/model",
                   .model_aliases = {"fake-alias"},
+                  .model_type = "fake-type",
+                  .model_fingerprint = "sha256:fake-model",
                   .tokenizer_id = "fake-tokenizer",
+                  .tokenizer_fingerprint = "sha256:fake-tokenizer",
+                  .tokenizer_config_fingerprint = "sha256:fake-config",
                   .template_id = "fake-template",
                   .template_fingerprint = "sha256:fake"},
         capabilities_{.preserves_reasoning = true,
@@ -77,7 +83,11 @@ class FakeProfile final : public ModelProtocolProfile {
 
 LoadedModelContext make_context(const std::string& model_id) {
   return {.model_id = model_id,
+          .model_type = "fake-type",
+          .model_fingerprint = "sha256:fake-model",
           .tokenizer_id = "fake-tokenizer",
+          .tokenizer_fingerprint = "sha256:fake-tokenizer",
+          .tokenizer_config_fingerprint = "sha256:fake-config",
           .template_id = "fake-template",
           .template_fingerprint = "sha256:fake"};
 }
@@ -135,6 +145,75 @@ TEST(ProfileRegistryTest, IdentityMismatchReturnsDeploymentError) {
   ASSERT_FALSE(result.ok());
   EXPECT_EQ(result.error().code(),
             ModelProtocolErrorCode::PROFILE_IDENTITY_MISMATCH);
+}
+
+LoadedModelContext make_deepseek_context() {
+  return {
+      .model_id = "deepseek-v4",
+      .model_type = "deepseek_v4",
+      .model_fingerprint =
+          "sha256:"
+          "333f773ad8f613d632293ad4da456df7620074f905705c0e5270b42b4031c9a4",
+      .tokenizer_id = "/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa",
+      .tokenizer_fingerprint =
+          "sha256:"
+          "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+      .tokenizer_config_fingerprint =
+          "sha256:"
+          "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+      .template_id =
+          "xllm/core/framework/chat_template/deepseek_v4_cpp_template.cpp",
+      .template_fingerprint =
+          "sha256:"
+          "7f48dc5b255443128e84bd6266c0802cff6bd538db9827f877852a3586c9b16f"};
+}
+
+TEST(ProfileRegistryTest, DeepseekRequiresCompleteFrozenIdentity) {
+  ProfileRegistry registry;
+  ASSERT_TRUE(registry.add(make_deepseek_v4_profile()).ok());
+
+  ProfileResult result = registry.resolve(make_deepseek_context());
+
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.profile()->identity().profile_id, "deepseek_v4_responses");
+  EXPECT_EQ(result.profile()->raw_decoding().policy,
+            OutputDecodingPolicy::PROTOCOL_RAW);
+  EXPECT_EQ(result.profile()->raw_decoding().parser_dialect,
+            "deepseek_v4_dsml");
+  EXPECT_EQ(result.profile()->raw_decoding().max_marker_bytes, 23);
+  EXPECT_NE(result.profile()->new_parser(), nullptr);
+  TemplatePolicy preserve =
+      result.profile()->resolve_template(ThinkingHistoryPolicy::PRESERVE);
+  ASSERT_TRUE(preserve.drop_thinking.has_value());
+  EXPECT_FALSE(*preserve.drop_thinking);
+
+  LoadedModelContext mismatched = make_deepseek_context();
+  mismatched.tokenizer_fingerprint = "sha256:wrong";
+  ProfileResult rejected = registry.resolve(mismatched);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_EQ(rejected.error().code(),
+            ModelProtocolErrorCode::PROFILE_IDENTITY_MISMATCH);
+}
+
+TEST(ProfileRegistryTest, DeepseekMapsEffortAndSampling) {
+  std::shared_ptr<const ModelProtocolProfile> profile =
+      make_deepseek_v4_profile();
+
+  SamplingPolicy low = profile->resolve_sampling(
+      ReasoningEffort::MINIMAL, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(low.effort, ReasoningEffort::LOW);
+  EXPECT_FLOAT_EQ(low.temperature, 1.0f);
+  EXPECT_FLOAT_EQ(low.top_p, 0.95f);
+
+  SamplingPolicy xhigh = profile->resolve_sampling(
+      ReasoningEffort::XHIGH, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(xhigh.effort, ReasoningEffort::HIGH);
+
+  SamplingPolicy none = profile->resolve_sampling(
+      ReasoningEffort::NONE, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(none.effort, ReasoningEffort::NONE);
+  EXPECT_FLOAT_EQ(none.temperature, 0.2f);
+  EXPECT_FLOAT_EQ(none.top_p, 0.4f);
 }
 
 }  // namespace

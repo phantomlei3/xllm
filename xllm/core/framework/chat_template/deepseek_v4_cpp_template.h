@@ -38,6 +38,15 @@ class DeepseekV4CppTemplate final : public ChatTemplate {
       const std::vector<xllm::JsonTool>& json_tools,
       const nlohmann::ordered_json& chat_template_kwargs) const override;
 
+  std::optional<std::string> apply(
+      const ChatMessages& messages,
+      const std::vector<xllm::JsonTool>& json_tools,
+      const std::vector<xllm::Tool>& protocol_tools,
+      const model_protocol::TemplatePolicy& template_policy,
+      model_protocol::ReasoningEffort reasoning_effort,
+      const model_protocol::ToolChoice& tool_choice,
+      const nlohmann::ordered_json& chat_template_kwargs) const override;
+
  private:
   TokenizerArgs args_;
 };

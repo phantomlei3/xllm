@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace xllm::model_protocol {
@@ -62,6 +63,7 @@ struct ToolChoice {
 struct TemplatePolicy {
   ThinkingHistoryPolicy thinking_history =
       ThinkingHistoryPolicy::TEMPLATE_DEFAULT;
+  std::optional<bool> drop_thinking;
 };
 
 }  // namespace xllm::model_protocol

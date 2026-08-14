@@ -22,7 +22,12 @@ namespace {
 
 bool identity_matches(const ModelProtocolIdentity& identity,
                       const LoadedModelContext& context) {
-  return identity.tokenizer_id == context.tokenizer_id &&
+  return identity.model_type == context.model_type &&
+         identity.model_fingerprint == context.model_fingerprint &&
+         identity.tokenizer_id == context.tokenizer_id &&
+         identity.tokenizer_fingerprint == context.tokenizer_fingerprint &&
+         identity.tokenizer_config_fingerprint ==
+             context.tokenizer_config_fingerprint &&
          identity.template_id == context.template_id &&
          identity.template_fingerprint == context.template_fingerprint;
 }

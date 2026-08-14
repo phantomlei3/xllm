@@ -22,7 +22,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/message.h"
+#include "core/common/tool.h"
 #include "core/common/types.h"
+#include "core/model_protocol/policy.h"
 #include "framework/tokenizer/tokenizer_args.h"
 
 namespace xllm {
@@ -38,6 +40,17 @@ class ChatTemplate {
       const ChatMessages& messages,
       const std::vector<xllm::JsonTool>& json_tools,
       const nlohmann::ordered_json& chat_template_kwargs) const = 0;
+
+  virtual std::optional<std::string> apply(
+      const ChatMessages& messages,
+      const std::vector<xllm::JsonTool>& json_tools,
+      const std::vector<xllm::Tool>& protocol_tools,
+      const model_protocol::TemplatePolicy& template_policy,
+      model_protocol::ReasoningEffort reasoning_effort,
+      const model_protocol::ToolChoice& tool_choice,
+      const nlohmann::ordered_json& chat_template_kwargs) const {
+    return apply(messages, json_tools, chat_template_kwargs);
+  }
 
   static std::unique_ptr<ChatTemplate> create(
       const TokenizerArgs& tokenizer_args,
