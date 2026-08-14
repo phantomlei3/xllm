@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace xllm {
 
@@ -31,7 +32,105 @@ const std::unordered_map<std::string, std::string> type_to_modality = {
     {"image_embedding", "image"},
     {"video_embedding", "video"},
     {"audio_embedding", "audio"}};
+
+std::string glm_effort(model_protocol::ReasoningEffort effort) {
+  switch (effort) {
+    case model_protocol::ReasoningEffort::NONE:
+      return "none";
+    case model_protocol::ReasoningEffort::XHIGH:
+    case model_protocol::ReasoningEffort::MAX:
+      return "max";
+    case model_protocol::ReasoningEffort::MINIMAL:
+    case model_protocol::ReasoningEffort::LOW:
+    case model_protocol::ReasoningEffort::MEDIUM:
+    case model_protocol::ReasoningEffort::HIGH:
+      return "high";
+  }
+  return "high";
 }
+
+bool selected_tool(const Tool& tool, const model_protocol::ToolChoice& choice) {
+  if (choice.kind == model_protocol::ToolChoiceKind::NONE) {
+    return false;
+  }
+  if (choice.kind != model_protocol::ToolChoiceKind::FUNCTION &&
+      choice.kind != model_protocol::ToolChoiceKind::CUSTOM) {
+    return true;
+  }
+  if (std::holds_alternative<FunctionTool>(tool)) {
+    return choice.kind == model_protocol::ToolChoiceKind::FUNCTION &&
+           std::get<FunctionTool>(tool).name == choice.name;
+  }
+  return choice.kind == model_protocol::ToolChoiceKind::CUSTOM &&
+         std::get<CustomTool>(tool).name == choice.name;
+}
+
+nlohmann::ordered_json protocol_tools_json(
+    const std::vector<Tool>& tools,
+    const model_protocol::ToolChoice& choice) {
+  nlohmann::ordered_json result = nlohmann::json::array();
+  for (const Tool& tool : tools) {
+    if (!selected_tool(tool, choice)) {
+      continue;
+    }
+    nlohmann::ordered_json function;
+    if (std::holds_alternative<FunctionTool>(tool)) {
+      const FunctionTool& value = std::get<FunctionTool>(tool);
+      function["description"] = value.description;
+      function["name"] = value.name;
+      function["parameters"] = value.parameters;
+    } else {
+      const CustomTool& value = std::get<CustomTool>(tool);
+      function["description"] =
+          "Apply an exact patch. Every added content line must start with a "
+          "literal plus sign (+), and the patch must end with a newline.";
+      function["name"] = value.name;
+      function["parameters"] = {
+          {"properties",
+           {{"patch",
+             {{"description",
+               "Complete patch text, preserving every literal character "
+               "including leading + and final newline."},
+              {"type", "string"}}}}},
+          {"required", {"patch"}},
+          {"type", "object"}};
+    }
+    result.emplace_back(nlohmann::ordered_json{
+        {"type", "function"}, {"function", std::move(function)}});
+  }
+  return result;
+}
+
+nlohmann::ordered_json protocol_calls_json(
+    const Message::ProtocolToolCallVec& calls) {
+  nlohmann::ordered_json result = nlohmann::json::array();
+  for (const ToolCall& tool_call : calls) {
+    nlohmann::ordered_json function;
+    std::string id;
+    if (std::holds_alternative<FunctionCall>(tool_call)) {
+      const FunctionCall& call = std::get<FunctionCall>(tool_call);
+      id = call.id;
+      function["name"] = call.name;
+      function["arguments"] = nlohmann::ordered_json::parse(call.arguments);
+    } else {
+      const CustomToolCall& call = std::get<CustomToolCall>(tool_call);
+      id = call.id;
+      function["name"] = call.name;
+      std::string input = call.input;
+      // The frozen GLM replay prompt omits the patch terminator newline.
+      if (input.ends_with('\n')) {
+        input.pop_back();
+      }
+      function["arguments"] = {{"patch", std::move(input)}};
+    }
+    result.emplace_back(
+        nlohmann::ordered_json{{"id", std::move(id)},
+                               {"type", "function"},
+                               {"function", std::move(function)}});
+  }
+  return result;
+}
+}  // namespace
 
 JinjaChatTemplate::JinjaChatTemplate(const TokenizerArgs& args) : args_(args) {
   try {
@@ -125,6 +224,89 @@ std::optional<std::string> JinjaChatTemplate::apply(
   }
   // apply the template
   return apply(messages_json, tools_json, chat_template_kwargs);
+}
+
+std::optional<std::string> JinjaChatTemplate::apply(
+    const ChatMessages& messages,
+    const std::vector<xllm::JsonTool>& json_tools,
+    const std::vector<xllm::Tool>& protocol_tools,
+    const model_protocol::TemplatePolicy& template_policy,
+    model_protocol::ReasoningEffort reasoning_effort,
+    const model_protocol::ToolChoice& tool_choice,
+    const nlohmann::ordered_json& chat_template_kwargs) const {
+  if (template_policy.thinking_history ==
+      model_protocol::ThinkingHistoryPolicy::TEMPLATE_DEFAULT) {
+    return apply(messages, json_tools, chat_template_kwargs);
+  }
+
+  try {
+    nlohmann::ordered_json messages_json = nlohmann::json::array();
+    for (const Message& message : messages) {
+      nlohmann::ordered_json message_json;
+      message_json["role"] = message.role;
+      if (std::holds_alternative<std::string>(message.content)) {
+        message_json["content"] = std::get<std::string>(message.content);
+      } else {
+        message_json["content"] =
+            get_mm_content(std::get<MMContentVec>(message.content));
+      }
+      if (message.tool_call_id.has_value()) {
+        message_json["tool_call_id"] = *message.tool_call_id;
+      }
+      if (message.reasoning_content.has_value()) {
+        message_json["reasoning_content"] = *message.reasoning_content;
+      }
+      if (message.protocol_tool_calls.has_value()) {
+        message_json["tool_calls"] =
+            protocol_calls_json(*message.protocol_tool_calls);
+      } else if (message.tool_calls.has_value()) {
+        nlohmann::ordered_json calls = nlohmann::json::array();
+        for (const Message::ToolCall& call : *message.tool_calls) {
+          calls.emplace_back(nlohmann::ordered_json{
+              {"id", call.id},
+              {"type", call.type},
+              {"function",
+               {{"name", call.function.name},
+                {"arguments", call.function.arguments}}}});
+        }
+        message_json["tool_calls"] = std::move(calls);
+      }
+      messages_json.emplace_back(std::move(message_json));
+    }
+
+    nlohmann::ordered_json tools_json;
+    if (!protocol_tools.empty()) {
+      tools_json = protocol_tools_json(protocol_tools, tool_choice);
+    } else {
+      tools_json = nlohmann::json::array();
+      if (tool_choice.kind != model_protocol::ToolChoiceKind::NONE) {
+        for (const JsonTool& tool : json_tools) {
+          tools_json.emplace_back(nlohmann::ordered_json{
+              {"type", tool.type},
+              {"function",
+               {{"name", tool.function.name},
+                {"description", tool.function.description},
+                {"parameters", tool.function.parameters}}}});
+        }
+      }
+    }
+
+    nlohmann::ordered_json controlled_kwargs = chat_template_kwargs;
+    if (template_policy.thinking_history ==
+        model_protocol::ThinkingHistoryPolicy::PRESERVE) {
+      controlled_kwargs["clear_thinking"] = false;
+    } else if (template_policy.clear_thinking.has_value()) {
+      controlled_kwargs["clear_thinking"] = *template_policy.clear_thinking;
+    }
+    controlled_kwargs["enable_thinking"] =
+        reasoning_effort != model_protocol::ReasoningEffort::NONE;
+    controlled_kwargs["reasoning_effort"] = glm_effort(reasoning_effort);
+    return apply(messages_json, tools_json, controlled_kwargs);
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to normalize protocol chat template input: "
+               << e.what();
+    return std::nullopt;
+  }
 }
 
 std::optional<std::string> JinjaChatTemplate::apply(

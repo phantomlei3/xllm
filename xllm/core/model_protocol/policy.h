@@ -64,6 +64,7 @@ struct TemplatePolicy {
   ThinkingHistoryPolicy thinking_history =
       ThinkingHistoryPolicy::TEMPLATE_DEFAULT;
   std::optional<bool> drop_thinking;
+  std::optional<bool> clear_thinking;
 };
 
 }  // namespace xllm::model_protocol

@@ -24,6 +24,11 @@ cc_test(
     GTest::gtest_main
 )
 
+target_compile_definitions(
+  jinja_chat_template_test
+  PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
 cc_test (
   NAME
     deepseek_v32_cpp_template_test

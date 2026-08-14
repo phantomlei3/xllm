@@ -19,8 +19,10 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/model_protocol/deepseek_v4_profile.h"
+#include "core/model_protocol/glm_5_2_profile.h"
 
 namespace xllm::model_protocol {
 namespace {
@@ -208,6 +210,88 @@ TEST(ProfileRegistryTest, DeepseekMapsEffortAndSampling) {
   SamplingPolicy xhigh = profile->resolve_sampling(
       ReasoningEffort::XHIGH, /*temperature=*/0.2f, /*top_p=*/0.4f);
   EXPECT_EQ(xhigh.effort, ReasoningEffort::HIGH);
+
+  SamplingPolicy none = profile->resolve_sampling(
+      ReasoningEffort::NONE, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(none.effort, ReasoningEffort::NONE);
+  EXPECT_FLOAT_EQ(none.temperature, 0.2f);
+  EXPECT_FLOAT_EQ(none.top_p, 0.4f);
+}
+
+LoadedModelContext make_glm_context() {
+  return {
+      .model_id = "GLM-5-W4A8",
+      .model_type = "glm_moe_dsa",
+      .model_fingerprint =
+          "sha256:"
+          "0e4c1649072dda2d1c3f91196b33f390a3605e3732466dfb9e28ac4cdd2e91f5",
+      .tokenizer_id = "/ds_models/GLM-5.2-W4A8",
+      .tokenizer_fingerprint =
+          "sha256:"
+          "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+      .tokenizer_config_fingerprint =
+          "sha256:"
+          "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
+      .template_id = "/ds_models/GLM-5.2-W4A8/chat_template.jinja",
+      .template_fingerprint =
+          "sha256:"
+          "172dc74a35e1752df75ecfb2b2cf9326d2852bb1379868ebeec9571654489679"};
+}
+
+TEST(ProfileRegistryTest, GlmRequiresCompleteFrozenIdentity) {
+  ProfileRegistry registry;
+  ASSERT_TRUE(registry.add(make_glm_5_2_profile()).ok());
+
+  ProfileResult result = registry.resolve(make_glm_context());
+
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.profile()->identity().profile_id, "glm_5_2_responses");
+  EXPECT_EQ(result.profile()->raw_decoding().policy,
+            OutputDecodingPolicy::PROTOCOL_RAW);
+  EXPECT_EQ(result.profile()->raw_decoding().parser_dialect, "glm_5_2_native");
+  EXPECT_EQ(result.profile()->raw_decoding().max_marker_bytes, 15);
+  EXPECT_EQ(result.profile()->raw_decoding().preserved_token_ids,
+            std::vector<int64_t>({154820,
+                                  154822,
+                                  154824,
+                                  154826,
+                                  154827,
+                                  154828,
+                                  154829,
+                                  154841,
+                                  154842,
+                                  154843,
+                                  154844,
+                                  154847,
+                                  154848,
+                                  154849,
+                                  154850}));
+  EXPECT_NE(result.profile()->new_parser(), nullptr);
+  TemplatePolicy preserve =
+      result.profile()->resolve_template(ThinkingHistoryPolicy::PRESERVE);
+  ASSERT_TRUE(preserve.clear_thinking.has_value());
+  EXPECT_FALSE(*preserve.clear_thinking);
+
+  LoadedModelContext mismatched = make_glm_context();
+  mismatched.template_fingerprint = "sha256:wrong";
+  ProfileResult rejected = registry.resolve(mismatched);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_EQ(rejected.error().code(),
+            ModelProtocolErrorCode::PROFILE_IDENTITY_MISMATCH);
+}
+
+TEST(ProfileRegistryTest, GlmMapsEffortAndSampling) {
+  std::shared_ptr<const ModelProtocolProfile> profile = make_glm_5_2_profile();
+
+  SamplingPolicy low = profile->resolve_sampling(
+      ReasoningEffort::MINIMAL, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(low.effort, ReasoningEffort::HIGH);
+  EXPECT_FLOAT_EQ(low.temperature, 1.0f);
+  EXPECT_FLOAT_EQ(low.top_p, 0.95f);
+
+  SamplingPolicy xhigh = profile->resolve_sampling(
+      ReasoningEffort::XHIGH, /*temperature=*/0.2f, /*top_p=*/0.4f);
+  EXPECT_EQ(xhigh.effort, ReasoningEffort::MAX);
 
   SamplingPolicy none = profile->resolve_sampling(
       ReasoningEffort::NONE, /*temperature=*/0.2f, /*top_p=*/0.4f);
