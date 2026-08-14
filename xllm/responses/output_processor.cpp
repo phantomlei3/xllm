@@ -206,6 +206,60 @@ bool ResponsesProcessor::consume(const model_protocol::OutputSegment& segment) {
   return fail(ErrorCode::GENERATION_FAILED, "unknown output segment");
 }
 
+bool ResponsesProcessor::consume(const model_protocol::GenerationDelta& delta,
+                                 model_protocol::ModelOutputParser& parser) {
+  if (response_.status != ResponseStatus::IN_PROGRESS) {
+    return false;
+  }
+  if (delta.sequence_index != 0) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "responses generation only accepts sequence index 0");
+  }
+  if (ordinal_initialized_ && delta.generation_ordinal <= last_ordinal_) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "generation ordinal is not increasing");
+  }
+  ordinal_initialized_ = true;
+  last_ordinal_ = delta.generation_ordinal;
+  generated_tokens_ += delta.token_id_delta.size();
+
+  if (delta.backend_error.has_value()) {
+    const std::string message = delta.backend_error->message.empty()
+                                    ? "backend generation failed"
+                                    : delta.backend_error->message;
+    return fail(ErrorCode::GENERATION_FAILED, message);
+  }
+
+  const bool token_limit = config_.max_output_tokens.has_value() &&
+                           generated_tokens_ >= *config_.max_output_tokens;
+  const bool terminal = delta.finished || token_limit;
+  if (!terminal && delta.final_usage.has_value()) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "final usage arrived before generation finished");
+  }
+
+  const std::vector<model_protocol::OutputSegment> segments =
+      parser.consume(delta);
+  if (terminal) {
+    if (!delta.final_usage.has_value()) {
+      return fail(ErrorCode::GENERATION_FAILED,
+                  "generation finished without reliable usage");
+    }
+    if (!set_usage(*delta.final_usage, parser)) {
+      return false;
+    }
+  }
+  for (const model_protocol::OutputSegment& segment : segments) {
+    if (!consume(segment)) {
+      return false;
+    }
+  }
+  if (!terminal) {
+    return true;
+  }
+  return finish_delta(delta, token_limit);
+}
+
 bool ResponsesProcessor::append_reasoning(
     const model_protocol::OutputSegment& segment) {
   if (reasoning_closed_ || phase_ == OutputPhase::CALLS ||
@@ -431,6 +485,82 @@ bool ResponsesProcessor::fail(ErrorCode code, const std::string& message) {
   return false;
 }
 
+bool ResponsesProcessor::set_usage(
+    const model_protocol::GenerationUsage& usage,
+    const model_protocol::ModelOutputParser& parser) {
+  const int64_t expected_total = static_cast<int64_t>(usage.input_tokens) +
+                                 static_cast<int64_t>(usage.output_tokens);
+  if (usage.input_tokens < 0 || usage.cached_input_tokens < 0 ||
+      usage.output_tokens < 0 || usage.total_tokens < 0 ||
+      (usage.reasoning_tokens.has_value() && *usage.reasoning_tokens < 0) ||
+      usage.cached_input_tokens > usage.input_tokens ||
+      static_cast<int64_t>(usage.total_tokens) != expected_total ||
+      static_cast<uint64_t>(usage.output_tokens) != generated_tokens_) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "backend returned inconsistent generation usage");
+  }
+  const std::optional<int32_t> attributed = parser.reasoning_tokens();
+  if (usage.reasoning_tokens.has_value() && attributed.has_value() &&
+      *usage.reasoning_tokens != *attributed) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "backend and parser reasoning usage disagree");
+  }
+  if (!usage.reasoning_tokens.has_value() && !attributed.has_value()) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "reasoning token usage is not reliable");
+  }
+  model_protocol::GenerationUsage reliable = usage;
+  if (!reliable.reasoning_tokens.has_value()) {
+    reliable.reasoning_tokens = *attributed;
+  }
+  if (*reliable.reasoning_tokens > reliable.output_tokens) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "reasoning usage exceeds generated tokens");
+  }
+  response_.usage = reliable;
+  return true;
+}
+
+void ResponsesProcessor::mark_incomplete() {
+  if (active_kind_ == ActiveKind::REASONING) {
+    std::get<OutputReasoningItem>(response_.output[active_index_]).status =
+        ItemStatus::INCOMPLETE;
+  } else if (active_kind_ == ActiveKind::TEXT) {
+    std::get<OutputMessageItem>(response_.output[active_index_]).status =
+        ItemStatus::INCOMPLETE;
+  }
+}
+
+bool ResponsesProcessor::finish_delta(
+    const model_protocol::GenerationDelta& delta,
+    bool token_limit) {
+  const std::string reason = delta.finish_reason.value_or("");
+  const bool incomplete = token_limit || reason == "length";
+  if (incomplete) {
+    mark_incomplete();
+    response_.status = ResponseStatus::INCOMPLETE;
+    response_.incomplete_reason = "max_output_tokens";
+    return true;
+  }
+  if (!delta.finished ||
+      (reason != "stop" && reason != "eos" && reason != "tool_calls")) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "generation ended with an unsupported finish reason");
+  }
+  if (active_kind_ == ActiveKind::FUNCTION ||
+      active_kind_ == ActiveKind::CUSTOM) {
+    return fail(ErrorCode::GENERATION_FAILED,
+                "generation ended with an open call");
+  }
+  if (active_kind_ == ActiveKind::REASONING) {
+    close_text_item(ActiveKind::REASONING);
+  } else if (active_kind_ == ActiveKind::TEXT) {
+    close_text_item(ActiveKind::TEXT);
+  }
+  response_.status = ResponseStatus::COMPLETED;
+  return true;
+}
+
 std::string ResponsesProcessor::new_id(std::string_view prefix) {
   for (size_t attempt = 0; attempt < kIdAttempts; ++attempt) {
     std::string id = id_provider_->next(prefix);
@@ -471,30 +601,19 @@ const FinalResponse& ResponsesProcessor::finish() {
   if (response_.status != ResponseStatus::IN_PROGRESS) {
     return response_;
   }
-  if (active_kind_ == ActiveKind::FUNCTION ||
-      active_kind_ == ActiveKind::CUSTOM) {
-    fail(ErrorCode::GENERATION_FAILED, "generation ended with an open call");
-    return response_;
-  }
-  if (active_kind_ == ActiveKind::REASONING) {
-    close_text_item(ActiveKind::REASONING);
-  } else if (active_kind_ == ActiveKind::TEXT) {
-    close_text_item(ActiveKind::TEXT);
-  }
-  const bool incomplete =
-      std::any_of(response_.output.begin(),
-                  response_.output.end(),
-                  [](const OutputItem& item) {
-                    return std::visit(
-                        [](const auto& value) {
-                          return value.status == ItemStatus::INCOMPLETE;
-                        },
-                        item);
-                  });
-  response_.status =
-      incomplete ? ResponseStatus::INCOMPLETE : ResponseStatus::COMPLETED;
-  if (incomplete) {
-    response_.incomplete_reason = "max_output_tokens";
+  fail(ErrorCode::GENERATION_FAILED,
+       "generation finished without reliable usage");
+  return response_;
+}
+
+const FinalResponse& ResponsesProcessor::timeout() {
+  fail(ErrorCode::REQUEST_TIMEOUT, "request deadline exceeded");
+  return response_;
+}
+
+const FinalResponse& ResponsesProcessor::cancel() {
+  if (response_.status == ResponseStatus::IN_PROGRESS) {
+    response_.status = ResponseStatus::CANCELLED;
   }
   return response_;
 }

@@ -85,6 +85,9 @@ class ModelOutputParser {
   virtual ~ModelOutputParser() = default;
 
   virtual std::vector<OutputSegment> consume(const GenerationDelta& delta) = 0;
+  virtual std::optional<int32_t> reasoning_tokens() const {
+    return std::nullopt;
+  }
 };
 
 std::unique_ptr<ModelOutputParser> make_text_reasoning_parser(

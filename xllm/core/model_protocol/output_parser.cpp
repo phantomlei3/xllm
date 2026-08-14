@@ -260,6 +260,13 @@ class TextReasoningParser final : public ModelOutputParser {
     return output;
   }
 
+  std::optional<int32_t> reasoning_tokens() const override {
+    if (!token_boundaries_) {
+      return std::nullopt;
+    }
+    return reasoning_tokens_;
+  }
+
  private:
   std::vector<OutputSegment> fail(ParseFailureCode code,
                                   const std::string& message) {
@@ -280,9 +287,12 @@ class TextReasoningParser final : public ModelOutputParser {
       if (reserved_tokens_.contains(token_id)) {
         if (token_id == grammar_.reasoning_end_token) {
           ++reasoning_markers_;
+          reasoning_tokens_done_ = true;
         } else if (token_id == grammar_.text_end_token) {
           ++text_markers_;
         }
+      } else if (!reasoning_tokens_done_) {
+        ++reasoning_tokens_;
       }
     }
   }
@@ -791,6 +801,8 @@ class TextReasoningParser final : public ModelOutputParser {
   bool failed_ = false;
   bool token_boundaries_ = false;
   bool text_started_ = false;
+  bool reasoning_tokens_done_ = false;
+  int32_t reasoning_tokens_ = 0;
   size_t reasoning_markers_ = 0;
   size_t text_markers_ = 0;
   OutputSegment failure_segment_;

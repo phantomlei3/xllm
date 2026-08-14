@@ -71,6 +71,7 @@ struct ProcessorConfig {
   model_protocol::ReasoningEffort reasoning_effort =
       model_protocol::ReasoningEffort::MEDIUM;
   std::vector<InputItem> replayed_items;
+  std::optional<uint32_t> max_output_tokens;
   ResponsesLimits limits;
 };
 
@@ -82,7 +83,11 @@ class ResponsesProcessor final {
                                   std::make_unique<RandomIdProvider>());
 
   bool consume(const model_protocol::OutputSegment& segment);
+  bool consume(const model_protocol::GenerationDelta& delta,
+               model_protocol::ModelOutputParser& parser);
   const FinalResponse& finish();
+  const FinalResponse& timeout();
+  const FinalResponse& cancel();
   const FinalResponse& response() const { return response_; }
 
  private:
@@ -111,6 +116,11 @@ class ResponsesProcessor final {
   bool done_custom();
   bool close_text_item(ActiveKind kind);
   bool fail(ErrorCode code, const std::string& message);
+  bool finish_delta(const model_protocol::GenerationDelta& delta,
+                    bool token_limit);
+  bool set_usage(const model_protocol::GenerationUsage& usage,
+                 const model_protocol::ModelOutputParser& parser);
+  void mark_incomplete();
   std::string new_id(std::string_view prefix);
   std::string call_id(const std::optional<std::string>& candidate);
   void reserve_replayed_ids();
@@ -123,6 +133,9 @@ class ResponsesProcessor final {
   size_t active_index_ = 0;
   bool reasoning_closed_ = false;
   bool text_closed_ = false;
+  bool ordinal_initialized_ = false;
+  uint64_t last_ordinal_ = 0;
+  uint64_t generated_tokens_ = 0;
   std::unordered_set<std::string> ids_;
 };
 

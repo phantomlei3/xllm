@@ -92,7 +92,8 @@ nlohmann::json encode_usage(const model_protocol::GenerationUsage& usage) {
       {"input_tokens", usage.input_tokens},
       {"input_tokens_details", {{"cached_tokens", usage.cached_input_tokens}}},
       {"output_tokens", usage.output_tokens},
-      {"output_tokens_details", {{"reasoning_tokens", usage.reasoning_tokens}}},
+      {"output_tokens_details",
+       {{"reasoning_tokens", usage.reasoning_tokens.value_or(0)}}},
       {"total_tokens", usage.total_tokens}};
 }
 

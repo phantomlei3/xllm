@@ -540,6 +540,22 @@ TEST(ModelOutputParserTest, RejectsSequenceMixingAndBackendErrors) {
   EXPECT_EQ(failed[0].failure->code, ParseFailureCode::BACKEND_ERROR);
 }
 
+TEST(ModelOutputParserTest, AttributesReasoningFromRawTokenBoundaries) {
+  std::unique_ptr<ModelOutputParser> parser =
+      make_deepseek_v4_profile()->new_parser();
+  parser->consume({.sequence_index = 0,
+                   .generation_ordinal = 0,
+                   .text_delta = "two tokens</think>",
+                   .token_id_delta = {101, 102, 128822}});
+  parser->consume({.sequence_index = 0,
+                   .generation_ordinal = 1,
+                   .text_delta = "answer<｜end▁of▁sentence｜>",
+                   .token_id_delta = {103, 1},
+                   .finished = true,
+                   .finish_reason = "stop"});
+  EXPECT_EQ(parser->reasoning_tokens(), 2);
+}
+
 TEST(GenerationNormalizerTest, ConvertsCumulativeCallbacksToUniqueDeltas) {
   RequestOutputNormalizer normalizer;
   CumulativeGeneration first{.sequence_index = 0,

@@ -55,7 +55,7 @@ struct GenerationUsage {
   int32_t input_tokens = 0;
   int32_t cached_input_tokens = 0;
   int32_t output_tokens = 0;
-  int32_t reasoning_tokens = 0;
+  std::optional<int32_t> reasoning_tokens;
   int32_t total_tokens = 0;
 };
 
