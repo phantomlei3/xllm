@@ -25,6 +25,7 @@
   ],
   "fixtures": [
     {"path": "compatibility-matrix.json", "kind": "contract", "source": "phase 0 specification plus captured Codex deviations"},
+    {"path": "requests/codex-tool-loop-start.json", "kind": "captured_request", "source": "sanitized Codex capture request-1 preserving observed fields and tool definitions"},
     {"path": "requests/plain-text-nonstream.json", "kind": "request", "source": "normative xLLM profile derived from captured plain-text shape"},
     {"path": "requests/function-tool-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
     {"path": "requests/apply-patch-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},

@@ -6,6 +6,11 @@ Responses endpoint with a local model catalog entry for `deepseek-v4`. The
 scripted endpoint caused one function call and one `apply_patch` custom call;
 Codex executed both and emitted both output items in later requests.
 
+`requests/codex-tool-loop-start.json` preserves the observed top-level fields
+and the complete `apply_patch` description and Lark grammar. The other request
+fixtures isolate individual contract paths, and the non-stream request is a
+normative projection because Codex used SSE during capture.
+
 The committed samples are minimized and sanitized. Session, installation,
 thread, turn, message, and generated output IDs were replaced with deterministic
 fixture IDs. System instructions, local paths, timestamps, environment details,

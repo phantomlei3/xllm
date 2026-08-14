@@ -6,7 +6,18 @@
   "parallel_tool_calls": true,
   "reasoning": {"effort": "medium", "summary": "auto"},
   "include": ["reasoning.encrypted_content"],
+  "text": {"verbosity": "low"},
   "prompt_cache_key": "fixture-session",
-  "tools": [{"type": "custom", "name": "apply_patch"}],
+  "client_metadata": {"x-codex-turn-metadata": "<redacted>"},
+  "tools": [{
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Apply a patch in the fixture workspace.",
+    "format": {
+      "type": "grammar",
+      "syntax": "lark",
+      "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+  }],
   "tool_choice": {"type": "custom", "name": "apply_patch"}
 }

@@ -1,0 +1,51 @@
+{
+  "model": "fixture-model",
+  "input": [
+    {
+      "id": "msg_fixture_developer",
+      "type": "message",
+      "role": "developer",
+      "content": [{"type": "input_text", "text": "Use the fixture tools when requested."}]
+    },
+    {
+      "id": "msg_fixture_user",
+      "type": "message",
+      "role": "user",
+      "content": [{"type": "input_text", "text": "Run the sanitized fixture workflow."}]
+    }
+  ],
+  "instructions": "Keep fixture output deterministic.",
+  "tools": [
+    {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command in the fixture workspace.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {"cmd": {"type": "string"}},
+        "required": ["cmd"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "custom",
+      "name": "apply_patch",
+      "description": "Apply a patch in the fixture workspace.",
+      "format": {
+        "type": "grammar",
+        "syntax": "lark",
+        "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {"effort": "medium", "summary": "auto"},
+  "store": false,
+  "stream": true,
+  "include": ["reasoning.encrypted_content"],
+  "text": {"verbosity": "low"},
+  "prompt_cache_key": "fixture-session",
+  "client_metadata": {"x-codex-turn-metadata": "<redacted>"}
+}
