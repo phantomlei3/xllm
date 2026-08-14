@@ -21,6 +21,7 @@ limitations under the License.
 #include <variant>
 #include <vector>
 
+#include "chat.pb.h"
 #include "core/common/tool.h"
 #include "core/model_protocol/policy.h"
 
@@ -80,11 +81,13 @@ struct ResponsesRequest {
 };
 
 struct PreparedRequest {
+  proto::ChatRequest chat_request;
   std::vector<InputItem> canonical_input;
   ResponsesOptions options;
   std::string profile_id;
   std::string canonical_model_id;
   RequestContext context;
+  uint32_t sequence_count = 1;
 };
 
 }  // namespace xllm::responses

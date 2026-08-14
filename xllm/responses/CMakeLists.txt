@@ -5,12 +5,15 @@ cc_library(
     xllm_responses
   HDRS
     error.h
+    request_preparer.h
     responses_limits.h
     types.h
   SRCS
     error.cpp
+    request_preparer.cpp
   DEPS
     :xllm_model_protocol
     :xllm_tool_protocol
     nlohmann_json::nlohmann_json
+    proto::xllm_proto
 )

@@ -36,3 +36,20 @@ cc_test(
     GTest::gtest_main
     proto::xllm_proto
 )
+
+cc_test(
+  NAME
+    responses_request_preparer_test
+  SRCS
+    request_preparer_test.cpp
+  DEPS
+    :xllm_responses
+    GTest::gtest_main
+    proto::xllm_proto
+    responses_fixture_loader
+)
+
+target_compile_definitions(
+  responses_request_preparer_test
+  PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
