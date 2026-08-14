@@ -65,6 +65,16 @@ void ServiceImplFactory::create(
              create_service_impl<SampleServiceImpl>(llm_master, models);
          self->chat_service_impl_ =
              create_service_impl<ChatServiceImpl>(llm_master, models);
+         self->responses_service_impl_ =
+             std::make_unique<ResponsesServiceImpl>();
+         for (const std::string& model : models) {
+           self->responses_service_impl_->add_model(
+               inspect_responses_model(model, *llm_master), llm_master);
+         }
+         if (self->responses_service_impl_->deployment_error().has_value()) {
+           LOG(FATAL) << "Invalid Responses model deployment: "
+                      << *self->responses_service_impl_->deployment_error();
+         }
          self->embedding_service_impl_ =
              create_service_impl<EmbeddingServiceImpl>(llm_master, models);
          if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {

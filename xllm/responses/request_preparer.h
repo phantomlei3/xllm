@@ -25,6 +25,20 @@ limitations under the License.
 
 namespace xllm::responses {
 
+class ModelFieldResult final {
+ public:
+  explicit ModelFieldResult(std::string model);
+  explicit ModelFieldResult(ResponsesError error);
+
+  bool ok() const { return !model_.empty(); }
+  const std::string& model() const { return model_; }
+  const ResponsesError& error() const { return error_; }
+
+ private:
+  std::string model_;
+  ResponsesError error_;
+};
+
 class PrepareResult final {
  public:
   explicit PrepareResult(PreparedRequest value);
@@ -44,5 +58,7 @@ PrepareResult prepare_request(
     const model_protocol::ModelProtocolIdentity& profile,
     const RequestContext& context,
     const ResponsesLimits& limits = ResponsesLimits());
+
+ModelFieldResult read_model_field(const std::string& body);
 
 }  // namespace xllm::responses

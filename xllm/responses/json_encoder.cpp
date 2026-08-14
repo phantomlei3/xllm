@@ -72,6 +72,32 @@ const char* effort_name(model_protocol::ReasoningEffort effort) {
 
 const char* error_code_name(ErrorCode code) {
   switch (code) {
+    case ErrorCode::INVALID_JSON:
+      return "invalid_json";
+    case ErrorCode::INVALID_REQUEST:
+      return "invalid_request";
+    case ErrorCode::UNSUPPORTED_PARAMETER:
+      return "unsupported_parameter";
+    case ErrorCode::UNSUPPORTED_ITEM_TYPE:
+      return "unsupported_item_type";
+    case ErrorCode::UNSUPPORTED_CONTENT_TYPE:
+      return "unsupported_content_type";
+    case ErrorCode::UNSUPPORTED_MODEL_CAPABILITY:
+      return "unsupported_model_capability";
+    case ErrorCode::MODEL_NOT_FOUND:
+      return "model_not_found";
+    case ErrorCode::MODEL_MISMATCH:
+      return "model_mismatch";
+    case ErrorCode::UNKNOWN_TOOL:
+      return "unknown_tool";
+    case ErrorCode::UNKNOWN_CALL_ID:
+      return "unknown_call_id";
+    case ErrorCode::DUPLICATE_CALL_ID:
+      return "duplicate_call_id";
+    case ErrorCode::TOOL_CALL_TYPE_MISMATCH:
+      return "tool_call_type_mismatch";
+    case ErrorCode::INVALID_ITEM_ORDER:
+      return "invalid_item_order";
     case ErrorCode::INVALID_TOOL_ARGUMENTS:
       return "invalid_tool_arguments";
     case ErrorCode::REQUEST_TOO_LARGE:
@@ -82,9 +108,14 @@ const char* error_code_name(ErrorCode code) {
       return "request_cancelled";
     case ErrorCode::REQUEST_TIMEOUT:
       return "request_timeout";
-    default:
-      return "invalid_request";
+    case ErrorCode::CLIENT_TOO_SLOW:
+      return "client_too_slow";
+    case ErrorCode::TOO_MANY_ITEMS:
+      return "too_many_items";
+    case ErrorCode::MAX_DEPTH_EXCEEDED:
+      return "max_depth_exceeded";
   }
+  return "invalid_request";
 }
 
 nlohmann::json encode_usage(const model_protocol::GenerationUsage& usage) {
@@ -143,6 +174,16 @@ nlohmann::json encode_item(const OutputItem& item) {
       item);
 }
 
+nlohmann::json encode_error(const ResponsesError& error) {
+  return {{"error",
+           {{"message", error.message},
+            {"type", error.type},
+            {"param",
+             error.param.empty() ? nlohmann::json(nullptr)
+                                 : nlohmann::json(error.param)},
+            {"code", error_code_name(error.code)}}}};
+}
+
 nlohmann::json encode_response(const FinalResponse& response) {
   nlohmann::json output = nlohmann::json::array();
   output.get_ref<nlohmann::json::array_t&>().reserve(response.output.size());
@@ -151,13 +192,7 @@ nlohmann::json encode_response(const FinalResponse& response) {
   }
   nlohmann::json error = nullptr;
   if (response.error.has_value()) {
-    error = {
-        {"message", response.error->message},
-        {"type", response.error->type},
-        {"param",
-         response.error->param.empty() ? nlohmann::json(nullptr)
-                                       : nlohmann::json(response.error->param)},
-        {"code", error_code_name(response.error->code)}};
+    error = encode_error(*response.error)["error"];
   }
   nlohmann::json incomplete_details = nullptr;
   if (response.incomplete_reason.has_value()) {

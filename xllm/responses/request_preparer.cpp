@@ -1137,6 +1137,31 @@ class RequestAssembler final {
 
 }  // namespace
 
+ModelFieldResult::ModelFieldResult(std::string model)
+    : model_(std::move(model)) {}
+
+ModelFieldResult::ModelFieldResult(ResponsesError error)
+    : error_(std::move(error)) {}
+
+ModelFieldResult read_model_field(const std::string& body) {
+  Json json;
+  try {
+    json = Json::parse(body);
+  } catch (const Json::parse_error&) {
+    return ModelFieldResult(make_error(
+        ErrorCode::INVALID_JSON, "body", "request body is not valid JSON"));
+  }
+  if (!json.is_object()) {
+    return ModelFieldResult(invalid("body", "request body must be an object"));
+  }
+  if (!json.contains("model") || !json["model"].is_string() ||
+      json["model"].get_ref<const std::string&>().empty()) {
+    return ModelFieldResult(
+        invalid("model", "model must be a non-empty string"));
+  }
+  return ModelFieldResult(json["model"].get<std::string>());
+}
+
 PrepareResult::PrepareResult(PreparedRequest value)
     : value_(std::move(value)) {}
 

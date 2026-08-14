@@ -127,6 +127,21 @@ cc_test(
     nlohmann_json::nlohmann_json
 )
 
+cc_test(
+  NAME
+    responses_service_impl_test
+  SRCS
+    responses_service_impl_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+target_compile_definitions(
+  responses_service_impl_test
+  PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
 # Integration smoke tests for OpenAI-compatible endpoints. These require a
 # running server and are disabled by default in code.
 cc_test(

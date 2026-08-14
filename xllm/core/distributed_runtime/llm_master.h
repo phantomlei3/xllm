@@ -74,6 +74,7 @@ class LLMMaster : public Master {
       const std::vector<RequestOutput>& outputs);
 
   const Tokenizer& tokenizer() const { return *tokenizer_; }
+  const std::string& model_type() const { return model_args_.model_type(); }
 
   // start running loop
   void run() override;

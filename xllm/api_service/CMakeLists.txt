@@ -22,6 +22,7 @@ cc_library(
     text_generation_service_impl.h
     video_generation_service_impl.h
     rerank_service_impl.h
+    responses_service_impl.h
     qwen3_rerank_service_impl.h
     non_stream_call.h
     service_impl_factory.h
@@ -52,6 +53,7 @@ cc_library(
     video_generation_service_impl.cpp
     models_service_impl.cpp
     rerank_service_impl.cpp
+    responses_service_impl.cpp
     stream_output_parser.cpp
     qwen3_rerank_service_impl.cpp
     embedding_output_builder.cpp
@@ -65,6 +67,7 @@ cc_library(
     absl::random_random
     :function_call
     :reasoning
+    :xllm_responses
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

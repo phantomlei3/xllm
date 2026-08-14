@@ -22,6 +22,7 @@ limitations under the License.
 namespace xllm::responses {
 
 nlohmann::json encode_item(const OutputItem& item);
+nlohmann::json encode_error(const ResponsesError& error);
 nlohmann::json encode_response(const FinalResponse& response);
 
 }  // namespace xllm::responses

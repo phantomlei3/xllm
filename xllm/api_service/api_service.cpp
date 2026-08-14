@@ -44,6 +44,7 @@ limitations under the License.
 #include "embedding.pb.h"
 #include "image_generation.pb.h"
 #include "models.pb.h"
+#include "responses/json_encoder.h"
 #include "service_impl_factory.h"
 #include "text_generation.pb.h"
 #include "video_generation.pb.h"
@@ -462,6 +463,54 @@ void APIService::ChatCompletionsHttp(
     return;
   }
   chat_completions_handler_(done_guard, ctrl, request, response);
+}
+
+void APIService::ResponsesHttp(::google::protobuf::RpcController* controller,
+                               const proto::HttpRequest* request,
+                               proto::HttpResponse* response,
+                               ::google::protobuf::Closure* done) {
+  auto done_guard = std::make_shared<xllm::ClosureGuard>(
+      done,
+      [](void* /*unused*/) { request_in_metric(nullptr); },
+      [controller](void* /*unused*/) {
+        request_out_metric(static_cast<void*>(controller));
+      });
+  if (request == nullptr || response == nullptr || controller == nullptr) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+  brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  api_service::ensure_http_x_request_id(ctrl);
+  if (!responses_service_impl_) {
+    ctrl->http_response().set_status_code(brpc::HTTP_STATUS_BAD_REQUEST);
+    ctrl->http_response().set_content_type("application/json");
+    ctrl->response_attachment().append(
+        responses::encode_error(
+            {.message = "Responses API is only supported for LLM models",
+             .param = "model",
+             .code = responses::ErrorCode::UNSUPPORTED_MODEL_CAPABILITY})
+            .dump());
+    return;
+  }
+  std::string body = ctrl->request_attachment().to_string();
+  const std::string content_type = ctrl->http_request().content_type();
+  const std::string* request_id =
+      ctrl->http_request().GetHeader("x-request-id");
+  const std::string* trace_id = ctrl->http_request().GetHeader("x-trace-id");
+  responses::RequestContext context{
+      .request_id = request_id == nullptr ? "" : *request_id,
+      .trace_id = trace_id == nullptr ? "" : *trace_id};
+  responses_service_impl_->process_non_stream(
+      body,
+      content_type,
+      std::move(context),
+      [ctrl,
+       done_guard = std::move(done_guard)](ResponsesHttpResult result) mutable {
+        ctrl->http_response().set_status_code(result.status_code);
+        ctrl->http_response().set_content_type("application/json");
+        ctrl->response_attachment().append(result.body.dump());
+        done_guard.reset();
+      });
 }
 
 void APIService::Embeddings(::google::protobuf::RpcController* controller,
