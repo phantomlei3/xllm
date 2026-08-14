@@ -1,0 +1,25 @@
+{
+  "model": "fixture-model",
+  "canonical_items": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Return one short fixture sentence."}
+      ]
+    }
+  ],
+  "execution_messages": [
+    {"role": "user", "content": "Return one short fixture sentence."}
+  ],
+  "options": {
+    "stream": false,
+    "store": false,
+    "previous_response_id": null,
+    "parallel_tool_calls": true,
+    "reasoning_effort": "medium"
+  },
+  "thinking_history_policy": "PRESERVE",
+  "output_decoding_policy": "PROTOCOL_RAW",
+  "sequence_count": 1
+}

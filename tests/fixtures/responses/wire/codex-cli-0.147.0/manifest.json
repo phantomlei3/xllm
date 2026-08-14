@@ -25,6 +25,7 @@
   ],
   "fixtures": [
     {"path": "compatibility-matrix.json", "kind": "contract", "source": "phase 0 specification plus captured Codex deviations"},
+    {"path": "wire-scenarios.json", "kind": "scenario_index", "source": "phase 0 conformance artifact mapping"},
     {"path": "requests/codex-tool-loop-start.json", "kind": "captured_request", "source": "sanitized Codex capture request-1 preserving observed fields and tool definitions"},
     {"path": "requests/plain-text-nonstream.json", "kind": "request", "source": "normative xLLM profile derived from captured plain-text shape"},
     {"path": "requests/function-tool-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
@@ -32,6 +33,7 @@
     {"path": "requests/function-tool-output.json", "kind": "request", "source": "sanitized Codex capture request-2"},
     {"path": "requests/tool-loop-replay.json", "kind": "request", "source": "sanitized Codex capture request-3"},
     {"path": "expected-responses/plain-text.json", "kind": "expected_response", "source": "normative frozen profile"},
+    {"path": "expected-prepared-requests/plain-text.json", "kind": "expected_prepared_request", "source": "phase 0 canonical request preparation contract"},
     {"path": "expected-sse/tool-loop.sse", "kind": "expected_sse", "source": "scripted capture events normalized to frozen profile"},
     {"path": "errors/rejected-requests.json", "kind": "errors", "source": "normative frozen profile"}
   ]

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "fixture_family": "chat_route_baseline",
+  "route": {
+    "path": "/v1/chat/completions",
+    "rpc": "ChatCompletionsHttp",
+    "stream_terminal": "[DONE]"
+  },
+  "reasoning_parser": {
+    "non_stream_input": "private reasoning</think>visible answer",
+    "expected_reasoning": "private reasoning",
+    "expected_content": "visible answer"
+  },
+  "templates": {
+    "deepseek_v4_chat_default": "TEMPLATE_DEFAULT",
+    "deepseek_v4_tool_marker": "<｜DSML｜tool_calls>",
+    "jinja_reasoning_field": "reasoning_content"
+  }
+}

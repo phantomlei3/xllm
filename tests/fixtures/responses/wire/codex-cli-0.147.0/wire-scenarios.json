@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "fixture_family": "codex_wire_scenarios",
+  "scenarios": [
+    {
+      "scenario_id": "plain_text_nonstream",
+      "input": "requests/plain-text-nonstream.json",
+      "expected": {
+        "prepared_request": "expected-prepared-requests/plain-text.json",
+        "final_response": "expected-responses/plain-text.json"
+      }
+    },
+    {
+      "scenario_id": "tool_loop",
+      "input": "requests/tool-loop-replay.json",
+      "expected": {
+        "sse_events": "expected-sse/tool-loop.sse"
+      }
+    }
+  ]
+}
