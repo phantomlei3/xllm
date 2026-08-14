@@ -55,8 +55,40 @@ using InputItem = std::variant<MessageItem,
                                CustomToolCallItem,
                                CustomToolCallOutput>;
 
-using OutputItem = std::
-    variant<MessageItem, ReasoningItem, FunctionCallItem, CustomToolCallItem>;
+enum class ItemStatus : uint8_t {
+  IN_PROGRESS = 0,
+  COMPLETED = 1,
+  INCOMPLETE = 2,
+};
+
+struct OutputMessageItem {
+  std::string id;
+  std::string content;
+  ItemStatus status = ItemStatus::IN_PROGRESS;
+};
+
+struct OutputReasoningItem {
+  std::string id;
+  std::string content;
+  ItemStatus status = ItemStatus::IN_PROGRESS;
+};
+
+struct OutputFunctionCallItem {
+  std::string id;
+  FunctionCall call;
+  ItemStatus status = ItemStatus::IN_PROGRESS;
+};
+
+struct OutputCustomToolCallItem {
+  std::string id;
+  CustomToolCall call;
+  ItemStatus status = ItemStatus::IN_PROGRESS;
+};
+
+using OutputItem = std::variant<OutputMessageItem,
+                                OutputReasoningItem,
+                                OutputFunctionCallItem,
+                                OutputCustomToolCallItem>;
 
 struct ResponsesOptions {
   bool stream = false;

@@ -53,3 +53,19 @@ target_compile_definitions(
   responses_request_preparer_test
   PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
+
+cc_test(
+  NAME
+    responses_output_processor_test
+  SRCS
+    output_processor_test.cpp
+  DEPS
+    :xllm_responses
+    GTest::gtest_main
+    responses_fixture_loader
+)
+
+target_compile_definitions(
+  responses_output_processor_test
+  PRIVATE XLLM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
