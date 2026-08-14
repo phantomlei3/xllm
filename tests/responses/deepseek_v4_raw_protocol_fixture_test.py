@@ -14,6 +14,7 @@
 
 """Characterization checks for the frozen DeepSeek V4 raw protocol."""
 
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -45,6 +46,14 @@ class DeepseekV4RawProtocolFixtureTest(unittest.TestCase):
         identity = self.fixture["identity"]
         for key in ("model", "tokenizer_sha256", "template_sha256", "runtime"):
             self.assertTrue(identity[key])
+
+    def test_template_fingerprint_matches_source(self) -> None:
+        identity = self.fixture["identity"]
+        template = Path(__file__).parents[2] / identity["template"]
+        self.assertEqual(
+            hashlib.sha256(template.read_bytes()).hexdigest(),
+            identity["template_sha256"],
+        )
 
     def test_raw_tokens_text_segments_items_and_events_align(self):
         for case in self.fixture["scenarios"]:

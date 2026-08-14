@@ -64,8 +64,8 @@ DeepseekV4Profile::DeepseekV4Profile()
                     "deepseek_v4_cpp_template.cpp",
                 .template_fingerprint =
                     "sha256:"
-                    "7f48dc5b255443128e84bd6266c0802cff6bd538db9827f877852a3586"
-                    "c9b16f"},
+                    "a06d98abfe8e4d78d2505ca28464e6b4af203731d6c07ee1ca9c4ab1"
+                    "bd77f95b"},
       capabilities_{.preserves_reasoning = true,
                     .supports_function_tools = true,
                     .supports_apply_patch = true,

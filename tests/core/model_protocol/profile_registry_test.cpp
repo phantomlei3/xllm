@@ -173,7 +173,7 @@ LoadedModelContext make_deepseek_context() {
           "xllm/core/framework/chat_template/deepseek_v4_cpp_template.cpp",
       .template_fingerprint =
           "sha256:"
-          "7f48dc5b255443128e84bd6266c0802cff6bd538db9827f877852a3586c9b16f"};
+          "a06d98abfe8e4d78d2505ca28464e6b4af203731d6c07ee1ca9c4ab1bd77f95b"};
 }
 
 TEST(ProfileRegistryTest, DeepseekRequiresCompleteFrozenIdentity) {
