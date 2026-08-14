@@ -5,6 +5,7 @@ cc_library(
     xllm_model_protocol
   HDRS
     deepseek_v4_profile.h
+    generation_delta.h
     glm_5_2_profile.h
     output_parser.h
     policy.h
@@ -12,6 +13,8 @@ cc_library(
     profile_registry.h
   SRCS
     deepseek_v4_profile.cpp
+    generation_delta.cpp
     glm_5_2_profile.cpp
+    output_parser.cpp
     profile_registry.cpp
 )

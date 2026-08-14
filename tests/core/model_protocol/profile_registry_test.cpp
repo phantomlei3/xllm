@@ -27,7 +27,13 @@ limitations under the License.
 namespace xllm::model_protocol {
 namespace {
 
-class FakeParser final : public ModelOutputParser {};
+class FakeParser final : public ModelOutputParser {
+ public:
+  std::vector<OutputSegment> consume(
+      const GenerationDelta& /*delta*/) override {
+    return {};
+  }
+};
 
 class FakeProfile final : public ModelProtocolProfile {
  public:

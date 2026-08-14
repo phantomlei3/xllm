@@ -222,6 +222,8 @@ std::string scenario_key(const std::string& profile,
 
 const char* artifact_key(ExpectedArtifact artifact) {
   switch (artifact) {
+    case ExpectedArtifact::RAW_GENERATION:
+      return "raw_generation";
     case ExpectedArtifact::PREPARED_REQUEST:
       return "expected_prepared_request";
     case ExpectedArtifact::PROMPT:

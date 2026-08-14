@@ -16,11 +16,10 @@ limitations under the License.
 #include "core/model_protocol/deepseek_v4_profile.h"
 
 #include <memory>
+#include <utility>
 
 namespace xllm::model_protocol {
 namespace {
-
-class DeepseekV4OutputParser final : public ModelOutputParser {};
 
 ReasoningEffort map_effort(ReasoningEffort effort) {
   switch (effort) {
@@ -119,7 +118,17 @@ TemplatePolicy DeepseekV4Profile::resolve_template(
 }
 
 std::unique_ptr<ModelOutputParser> DeepseekV4Profile::new_parser() const {
-  return std::make_unique<DeepseekV4OutputParser>();
+  TextReasoningGrammar grammar;
+  grammar.reasoning_end = "</think>";
+  grammar.reasoning_end_token = 128822;
+  grammar.text_end = "<｜end▁of▁sentence｜>";
+  grammar.text_end_token = 1;
+  for (int64_t token_id : raw_decoding_.preserved_token_ids) {
+    grammar.reserved_control_tokens.emplace_back(
+        static_cast<int32_t>(token_id));
+  }
+  grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
+  return make_text_reasoning_parser(std::move(grammar));
 }
 
 std::shared_ptr<const ModelProtocolProfile> make_deepseek_v4_profile() {

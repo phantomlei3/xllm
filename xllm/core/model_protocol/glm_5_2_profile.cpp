@@ -16,11 +16,10 @@ limitations under the License.
 #include "core/model_protocol/glm_5_2_profile.h"
 
 #include <memory>
+#include <utility>
 
 namespace xllm::model_protocol {
 namespace {
-
-class Glm52OutputParser final : public ModelOutputParser {};
 
 ReasoningEffort map_effort(ReasoningEffort effort) {
   switch (effort) {
@@ -130,7 +129,17 @@ TemplatePolicy Glm52Profile::resolve_template(
 }
 
 std::unique_ptr<ModelOutputParser> Glm52Profile::new_parser() const {
-  return std::make_unique<Glm52OutputParser>();
+  TextReasoningGrammar grammar;
+  grammar.reasoning_end = "</think>";
+  grammar.reasoning_end_token = 154842;
+  grammar.text_end = "<|user|>";
+  grammar.text_end_token = 154827;
+  for (int64_t token_id : raw_decoding_.preserved_token_ids) {
+    grammar.reserved_control_tokens.emplace_back(
+        static_cast<int32_t>(token_id));
+  }
+  grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
+  return make_text_reasoning_parser(std::move(grammar));
 }
 
 std::shared_ptr<const ModelProtocolProfile> make_glm_5_2_profile() {

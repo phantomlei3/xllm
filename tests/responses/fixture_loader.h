@@ -26,6 +26,7 @@ limitations under the License.
 namespace xllm::testing {
 
 enum class ExpectedArtifact {
+  RAW_GENERATION,
   PREPARED_REQUEST,
   PROMPT,
   PROMPT_TOKEN_IDS,

@@ -15,11 +15,56 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "core/model_protocol/generation_delta.h"
+
 namespace xllm::model_protocol {
+
+enum class OutputSegmentKind : uint8_t {
+  REASONING_DELTA = 0,
+  REASONING_DONE = 1,
+  TEXT_DELTA = 2,
+  TEXT_DONE = 3,
+  PARSE_FAILURE = 4,
+};
+
+struct OutputSegment {
+  OutputSegmentKind kind = OutputSegmentKind::REASONING_DELTA;
+  std::string raw;
+  std::string text;
+  bool incomplete = false;
+  std::optional<ParseFailure> failure;
+};
+
+inline bool operator==(const OutputSegment& left, const OutputSegment& right) {
+  return left.kind == right.kind && left.raw == right.raw &&
+         left.text == right.text && left.incomplete == right.incomplete &&
+         left.failure == right.failure;
+}
+
+struct TextReasoningGrammar {
+  std::string reasoning_end;
+  int32_t reasoning_end_token = 0;
+  std::string text_end;
+  int32_t text_end_token = 0;
+  std::vector<int32_t> reserved_control_tokens;
+  size_t max_marker_bytes = 0;
+};
 
 class ModelOutputParser {
  public:
   virtual ~ModelOutputParser() = default;
+
+  virtual std::vector<OutputSegment> consume(const GenerationDelta& delta) = 0;
 };
+
+std::unique_ptr<ModelOutputParser> make_text_reasoning_parser(
+    TextReasoningGrammar grammar);
 
 }  // namespace xllm::model_protocol
