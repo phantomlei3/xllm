@@ -34,6 +34,27 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr size_t kMaxIdBytes = 256;
+constexpr std::string_view kApplyPatchGrammar =
+    R"grammar(start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF
+)grammar";
 
 ResponsesError make_error(ErrorCode code,
                           std::string param,
@@ -255,7 +276,11 @@ class RequestAssembler final {
                             "temperature",
                             "top_p",
                             "tools",
-                            "tool_choice"},
+                            "tool_choice",
+                            "include",
+                            "prompt_cache_key",
+                            "client_metadata",
+                            "text"},
                            "")) {
       return PrepareResult(std::move(*error));
     }
@@ -279,6 +304,9 @@ class RequestAssembler final {
     prepared.context = context_;
     init_chat(&prepared);
 
+    if (std::optional<ResponsesError> error = parse_no_effect(body)) {
+      return PrepareResult(std::move(*error));
+    }
     if (std::optional<ResponsesError> error = parse_options(body, &prepared)) {
       return PrepareResult(std::move(*error));
     }
@@ -343,6 +371,69 @@ class RequestAssembler final {
     prepared->chat_request.set_output_decoding_policy(proto::PROTOCOL_RAW);
     prepared->chat_request.set_request_id(context_.request_id);
     prepared->chat_request.set_parallel_tool_calls(true);
+  }
+
+  std::optional<ResponsesError> parse_no_effect(const Json& body) const {
+    if (body.contains("include")) {
+      const Json& include = body["include"];
+      if (!include.is_array() || include.size() != 1 ||
+          !include[0].is_string() ||
+          include[0] != "reasoning.encrypted_content") {
+        return unsupported("include", "unsupported response include field");
+      }
+    }
+    if (body.contains("prompt_cache_key")) {
+      std::string cache_key;
+      if (std::optional<ResponsesError> error =
+              read_text(body["prompt_cache_key"],
+                        "prompt_cache_key",
+                        limits_,
+                        &cache_key)) {
+        return error;
+      }
+      if (cache_key.empty()) {
+        return unsupported("prompt_cache_key",
+                           "prompt cache key must not be empty");
+      }
+    }
+    if (body.contains("client_metadata")) {
+      const Json& metadata = body["client_metadata"];
+      if (!metadata.is_object()) {
+        return invalid("client_metadata", "client metadata must be an object");
+      }
+      if (std::optional<ResponsesError> error = reject_unknown(
+              metadata, {"x-codex-turn-metadata"}, "client_metadata")) {
+        return error;
+      }
+      if (!metadata.contains("x-codex-turn-metadata")) {
+        return invalid("client_metadata.x-codex-turn-metadata",
+                       "Codex turn metadata is required");
+      }
+      std::string value;
+      if (std::optional<ResponsesError> error =
+              read_text(metadata["x-codex-turn-metadata"],
+                        "client_metadata.x-codex-turn-metadata",
+                        limits_,
+                        &value)) {
+        return error;
+      }
+    }
+    if (body.contains("text")) {
+      const Json& text = body["text"];
+      if (!text.is_object()) {
+        return invalid("text", "text options must be an object");
+      }
+      if (std::optional<ResponsesError> error =
+              reject_unknown(text, {"verbosity"}, "text")) {
+        return error;
+      }
+      if (!text.contains("verbosity") || !text["verbosity"].is_string() ||
+          text["verbosity"] != "low") {
+        return unsupported("text.verbosity",
+                           "only captured low verbosity is accepted");
+      }
+    }
+    return std::nullopt;
   }
 
   std::optional<ResponsesError> parse_options(const Json& body,
@@ -426,8 +517,13 @@ class RequestAssembler final {
       return invalid("reasoning", "reasoning must be an object");
     }
     if (std::optional<ResponsesError> error =
-            reject_unknown(reasoning, {"effort"}, "reasoning")) {
+            reject_unknown(reasoning, {"effort", "summary"}, "reasoning")) {
       return error;
+    }
+    if (reasoning.contains("summary") &&
+        (!reasoning["summary"].is_string() || reasoning["summary"] != "auto")) {
+      return unsupported("reasoning.summary",
+                         "only captured automatic summary is accepted");
     }
     if (!reasoning.contains("effort") || !reasoning["effort"].is_string()) {
       return invalid("reasoning.effort", "reasoning effort is required");
@@ -559,8 +655,8 @@ class RequestAssembler final {
   std::optional<ResponsesError> parse_custom_tool(const Json& tool,
                                                   const std::string& param,
                                                   PreparedRequest* prepared) {
-    if (std::optional<ResponsesError> error =
-            reject_unknown(tool, {"type", "name"}, param)) {
+    if (std::optional<ResponsesError> error = reject_unknown(
+            tool, {"type", "name", "description", "format"}, param)) {
       return error;
     }
     if (!tool.contains("name") || !tool["name"].is_string()) {
@@ -570,6 +666,43 @@ class RequestAssembler final {
     if (name != "apply_patch") {
       return make_error(
           ErrorCode::UNKNOWN_TOOL, param + ".name", "unknown custom tool");
+    }
+    if (tool.contains("description")) {
+      std::string description;
+      if (std::optional<ResponsesError> error =
+              read_text(tool["description"],
+                        param + ".description",
+                        limits_,
+                        &description)) {
+        return error;
+      }
+    }
+    if (tool.contains("format")) {
+      const Json& format = tool["format"];
+      if (!format.is_object()) {
+        return invalid(param + ".format",
+                       "custom tool format must be an object");
+      }
+      if (std::optional<ResponsesError> error = reject_unknown(
+              format, {"type", "syntax", "definition"}, param + ".format")) {
+        return error;
+      }
+      if (!format.contains("type") || !format["type"].is_string() ||
+          format["type"] != "grammar") {
+        return unsupported(param + ".format.type",
+                           "only the captured grammar format is accepted");
+      }
+      if (!format.contains("syntax") || !format["syntax"].is_string() ||
+          format["syntax"] != "lark") {
+        return unsupported(param + ".format.syntax",
+                           "only the captured Lark syntax is accepted");
+      }
+      if (!format.contains("definition") || !format["definition"].is_string() ||
+          format["definition"].get_ref<const std::string&>() !=
+              kApplyPatchGrammar) {
+        return unsupported(param + ".format.definition",
+                           "only the captured apply_patch grammar is accepted");
+      }
     }
     if (!tool_names_.emplace("custom:" + name).second) {
       return invalid(param + ".name", "tool is duplicated");

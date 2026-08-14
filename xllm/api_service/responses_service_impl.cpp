@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "api_service/responses_service_impl.h"
 
+#include <glog/logging.h>
 #include <openssl/evp.h>
 
 #include <algorithm>
@@ -49,6 +50,66 @@ using responses::ResponsesError;
 
 ResponsesHttpResult error_result(int32_t status_code, ResponsesError error) {
   return {.status_code = status_code, .body = responses::encode_error(error)};
+}
+
+const char* terminal_status(responses::ResponseStatus status) {
+  switch (status) {
+    case responses::ResponseStatus::IN_PROGRESS:
+      return "in_progress";
+    case responses::ResponseStatus::COMPLETED:
+      return "completed";
+    case responses::ResponseStatus::INCOMPLETE:
+      return "incomplete";
+    case responses::ResponseStatus::FAILED:
+      return "failed";
+    case responses::ResponseStatus::CANCELLED:
+      return "cancelled";
+  }
+  return "failed";
+}
+
+struct RequestLogContext {
+  responses::RequestContext ids;
+  std::string model;
+  std::string profile;
+};
+
+RequestLogContext request_log_context(
+    const responses::PreparedRequest& request) {
+  return {.ids = request.context,
+          .model = request.canonical_model_id,
+          .profile = request.profile_id};
+}
+
+void log_rejection(const responses::RequestContext& context,
+                   const std::string& model,
+                   const std::string& profile,
+                   size_t body_bytes,
+                   ErrorCode code) {
+  const nlohmann::json encoded = responses::encode_error({.code = code});
+  LOG(INFO) << "Responses request trace_id=" << context.trace_id
+            << " request_id=" << context.request_id << " model=" << model
+            << " profile=" << profile
+            << " status=" << encoded["error"]["code"].get<std::string>()
+            << " body_bytes=" << body_bytes << " terminal=rejected";
+}
+
+void log_terminal(const RequestLogContext& request,
+                  const responses::FinalResponse& response,
+                  size_t body_bytes) {
+  LOG(INFO) << "Responses request trace_id=" << request.ids.trace_id
+            << " request_id=" << request.ids.request_id
+            << " response_id=" << response.id << " model=" << request.model
+            << " profile=" << request.profile
+            << " status=" << terminal_status(response.status)
+            << " body_bytes=" << body_bytes
+            << " output_items=" << response.output.size() << " input_tokens="
+            << (response.usage.has_value() ? response.usage->input_tokens : 0)
+            << " output_tokens="
+            << (response.usage.has_value() ? response.usage->output_tokens : 0)
+            << " total_tokens="
+            << (response.usage.has_value() ? response.usage->total_tokens : 0)
+            << " terminal=" << terminal_status(response.status);
 }
 
 bool is_json_content_type(const std::string& content_type) {
@@ -156,7 +217,8 @@ class StreamSession final : public ResponsesStreamControl,
       ResponsesExecutor* executor,
       std::shared_ptr<ResponsesStreamWriter> writer,
       std::shared_ptr<ResponsesSerialExecutor> serial_executor,
-      const responses::ResponsesLimits& limits)
+      const responses::ResponsesLimits& limits,
+      size_t body_bytes)
       : request_(request),
         parser_(profile->new_parser()),
         processor_({.model = request.canonical_model_id,
@@ -171,7 +233,8 @@ class StreamSession final : public ResponsesStreamControl,
         executor_(executor),
         writer_(std::move(writer)),
         serial_executor_(std::move(serial_executor)),
-        max_pending_bytes_(limits.max_sse_buffer_bytes) {}
+        max_pending_bytes_(limits.max_sse_buffer_bytes),
+        body_bytes_(body_bytes) {}
 
   void start() {
     self_keepalive_ = shared_from_this();
@@ -498,6 +561,8 @@ class StreamSession final : public ResponsesStreamControl,
       return;
     }
     finalized_ = true;
+    log_terminal(
+        request_log_context(request_), processor_.response(), body_bytes_);
     if (opened_) {
       writer_->close();
     }
@@ -515,6 +580,7 @@ class StreamSession final : public ResponsesStreamControl,
   std::shared_ptr<ResponsesSerialExecutor> serial_executor_;
   std::shared_ptr<StreamSession> self_keepalive_;
   uint64_t max_pending_bytes_;
+  size_t body_bytes_;
   std::atomic<uint64_t> pending_bytes_{0};
   std::atomic<bool> terminal_requested_{false};
   std::deque<std::string> frames_;
@@ -536,8 +602,10 @@ class NonStreamSession final {
       const responses::PreparedRequest& request,
       std::shared_ptr<const model_protocol::ModelProtocolProfile> profile,
       ResponsesServiceImpl::Completion completion,
-      const responses::ResponsesLimits& limits)
-      : parser_(profile->new_parser()),
+      const responses::ResponsesLimits& limits,
+      size_t body_bytes)
+      : log_context_(request_log_context(request)),
+        parser_(profile->new_parser()),
         processor_({.model = request.canonical_model_id,
                     .created_at =
                         std::chrono::duration_cast<std::chrono::seconds>(
@@ -547,7 +615,8 @@ class NonStreamSession final {
                     .replayed_items = request.canonical_input,
                     .max_output_tokens = request.options.max_output_tokens,
                     .limits = limits}),
-        completion_(std::move(completion)) {}
+        completion_(std::move(completion)),
+        body_bytes_(body_bytes) {}
 
   bool consume(RequestOutput output) {
     if (completed_) {
@@ -629,15 +698,18 @@ class NonStreamSession final {
       return;
     }
     completed_ = true;
+    log_terminal(log_context_, processor_.response(), body_bytes_);
     completion_({.status_code = 200,
                  .body = responses::encode_response(processor_.response())});
   }
 
+  RequestLogContext log_context_;
   std::unique_ptr<model_protocol::ModelOutputParser> parser_;
   model_protocol::RequestOutputNormalizer normalizer_;
   responses::ResponsesProcessor processor_;
   ResponsesServiceImpl::Completion completion_;
   uint64_t ordinal_ = 0;
+  size_t body_bytes_;
   bool completed_ = false;
 };
 
@@ -795,6 +867,13 @@ void ResponsesServiceImpl::process_non_stream(const std::string& body,
   responses::PrepareResult prepared = responses::prepare_request(
       body, backend->second.profile->identity(), context, limits_);
   if (!prepared.ok()) {
+    const model_protocol::ModelProtocolIdentity& identity =
+        backend->second.profile->identity();
+    log_rejection(context,
+                  identity.canonical_model_id,
+                  identity.profile_id,
+                  body.size(),
+                  prepared.error().code);
     completion(error_result(/*status_code=*/400, prepared.error()));
     return;
   }
@@ -809,7 +888,8 @@ void ResponsesServiceImpl::process_non_stream(const std::string& body,
   auto session = std::make_shared<NonStreamSession>(prepared.value(),
                                                     backend->second.profile,
                                                     std::move(completion),
-                                                    limits_);
+                                                    limits_,
+                                                    body.size());
   backend->second.executor->execute(
       prepared.value(), [session](RequestOutput output) {
         return session->consume(std::move(output));
@@ -855,6 +935,13 @@ std::shared_ptr<ResponsesStreamControl> ResponsesServiceImpl::process_stream(
   responses::PrepareResult prepared = responses::prepare_request(
       body, backend->second.profile->identity(), context, limits_);
   if (!prepared.ok()) {
+    const model_protocol::ModelProtocolIdentity& identity =
+        backend->second.profile->identity();
+    log_rejection(context,
+                  identity.canonical_model_id,
+                  identity.profile_id,
+                  body.size(),
+                  prepared.error().code);
     early_completion(error_result(/*status_code=*/400, prepared.error()));
     return nullptr;
   }
@@ -878,7 +965,8 @@ std::shared_ptr<ResponsesStreamControl> ResponsesServiceImpl::process_stream(
                                                  backend->second.executor,
                                                  std::move(writer),
                                                  executor_factory_(),
-                                                 limits_);
+                                                 limits_,
+                                                 body.size());
   session->start();
   return session;
 }

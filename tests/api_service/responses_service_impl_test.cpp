@@ -15,12 +15,14 @@ limitations under the License.
 
 #include "api_service/responses_service_impl.h"
 
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -76,6 +78,33 @@ class FakeResponsesExecutor final : public ResponsesExecutor {
 class InlineSerialExecutor final : public ResponsesSerialExecutor {
  public:
   void post(std::function<void()> task) override { task(); }
+};
+
+class SafeLogCapture final : public google::LogSink {
+ public:
+  SafeLogCapture() { google::AddLogSink(this); }
+  ~SafeLogCapture() override { google::RemoveLogSink(this); }
+
+  void send(google::LogSeverity /*severity*/,
+            const char* /*full_filename*/,
+            const char* /*base_filename*/,
+            int /*line*/,
+            const google::LogMessageTime& /*logmsgtime*/,
+            const char* message,
+            size_t message_len) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    messages_.append(message, message_len);
+    messages_.push_back('\n');
+  }
+
+  std::string messages() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return messages_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::string messages_;
 };
 
 ResponsesServiceImpl::SerialExecutorFactory inline_executor_factory() {
@@ -256,6 +285,68 @@ TEST(ResponsesServiceImplTest, CompletesThroughSharedPipeline) {
   EXPECT_EQ(executor.request().chat_request.output_decoding_policy(),
             proto::PROTOCOL_RAW);
   EXPECT_EQ(executor.request().sequence_count, 1);
+}
+
+TEST(ResponsesServiceImplTest, SuccessLogsOnlySafeResponseMetadata) {
+  const auto profile = model_protocol::make_deepseek_v4_profile();
+  FakeResponsesExecutor executor({text_output("GENERATED_SECRET")});
+  ResponsesServiceImpl service(responses::ResponsesLimits(),
+                               inline_executor_factory());
+  ASSERT_TRUE(service.add_model(context_for(profile->identity(), "deepseek-v4"),
+                                &executor));
+  SafeLogCapture logs;
+  ResponsesHttpResult result;
+
+  service.process_non_stream(
+      R"({"model":"deepseek-v4","input":[{"type":"message","role":"user","content":"PROMPT_SECRET"},{"type":"reasoning","id":"rs_safe","content":"REASONING_SECRET"},{"type":"function_call","id":"fc_safe","call_id":"call_safe","name":"read_fixture","arguments":"{\"secret\":\"ARGUMENT_SECRET\"}"},{"type":"function_call_output","call_id":"call_safe","output":"TOOL_OUTPUT_SECRET"},{"type":"custom_tool_call","id":"ctc_safe","call_id":"call_patch","name":"apply_patch","input":"PATCH_SECRET"},{"type":"custom_tool_call_output","call_id":"call_patch","output":"PATCH_OUTPUT_SECRET"}],"tools":[{"type":"function","name":"read_fixture","parameters":{}},{"type":"custom","name":"apply_patch"}]})",
+      "application/json",
+      {.request_id = "request-safe", .trace_id = "trace-safe"},
+      [&result](ResponsesHttpResult value) { result = std::move(value); });
+
+  ASSERT_EQ(result.status_code, 200);
+  const std::string captured = logs.messages();
+  EXPECT_NE(captured.find("trace_id=trace-safe"), std::string::npos);
+  EXPECT_NE(captured.find("request_id=request-safe"), std::string::npos);
+  EXPECT_NE(captured.find("model=deepseek-v4"), std::string::npos);
+  EXPECT_NE(captured.find("profile=deepseek_v4_responses"), std::string::npos);
+  EXPECT_NE(captured.find("status=completed"), std::string::npos);
+  EXPECT_NE(captured.find("input_tokens=2"), std::string::npos);
+  for (const std::string& secret : {"PROMPT_SECRET",
+                                    "REASONING_SECRET",
+                                    "ARGUMENT_SECRET",
+                                    "TOOL_OUTPUT_SECRET",
+                                    "PATCH_SECRET",
+                                    "PATCH_OUTPUT_SECRET",
+                                    "GENERATED_SECRET"}) {
+    EXPECT_EQ(captured.find(secret), std::string::npos) << secret;
+  }
+}
+
+TEST(ResponsesServiceImplTest, ErrorLogsOnlySafeRequestMetadata) {
+  const auto profile = model_protocol::make_deepseek_v4_profile();
+  FakeResponsesExecutor executor({text_output("unused")});
+  ResponsesServiceImpl service(responses::ResponsesLimits(),
+                               inline_executor_factory());
+  ASSERT_TRUE(service.add_model(context_for(profile->identity(), "deepseek-v4"),
+                                &executor));
+  SafeLogCapture logs;
+  ResponsesHttpResult result;
+
+  service.process_non_stream(
+      R"({"model":"deepseek-v4","input":"ERROR_PROMPT_SECRET","forbidden":"ERROR_BODY_SECRET"})",
+      "application/json",
+      {.request_id = "request-error", .trace_id = "trace-error"},
+      [&result](ResponsesHttpResult value) { result = std::move(value); });
+
+  ASSERT_EQ(result.status_code, 400);
+  const std::string captured = logs.messages();
+  EXPECT_NE(captured.find("trace_id=trace-error"), std::string::npos);
+  EXPECT_NE(captured.find("request_id=request-error"), std::string::npos);
+  EXPECT_NE(captured.find("model=deepseek-v4"), std::string::npos);
+  EXPECT_NE(captured.find("profile=deepseek_v4_responses"), std::string::npos);
+  EXPECT_NE(captured.find("status=unsupported_parameter"), std::string::npos);
+  EXPECT_EQ(captured.find("ERROR_PROMPT_SECRET"), std::string::npos);
+  EXPECT_EQ(captured.find("ERROR_BODY_SECRET"), std::string::npos);
 }
 
 TEST(ResponsesServiceImplTest, StreamsFormalTerminalAndClosesExactlyOnce) {
@@ -516,10 +607,42 @@ TEST(ResponsesServiceImplTest, FixtureStreamsReaggregateLikeNonStream) {
        .model = "deepseek-v4",
        .scenario = "reasoning_truncated",
        .expected_event = "response.incomplete"},
+      {.profile = "deepseek-v4",
+       .model = "deepseek-v4",
+       .scenario = "function_output_continue",
+       .expected_event = "response.output_text.delta"},
+      {.profile = "deepseek-v4",
+       .model = "deepseek-v4",
+       .scenario = "custom_output_continue",
+       .expected_event = "response.output_text.delta"},
       {.profile = "glm-5.2",
        .model = "GLM-5-W4A8",
        .scenario = "reasoning_text_stop",
-       .expected_event = "response.reasoning_text.delta"}};
+       .expected_event = "response.reasoning_text.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "reasoning_function_call",
+       .expected_event = "response.function_call_arguments.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "parallel_function_calls",
+       .expected_event = "response.function_call_arguments.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "reasoning_apply_patch",
+       .expected_event = "response.custom_tool_call_input.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "function_output_continue",
+       .expected_event = "response.output_text.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "custom_output_continue",
+       .expected_event = "response.output_text.delta"},
+      {.profile = "glm-5.2",
+       .model = "GLM-5-W4A8",
+       .scenario = "reasoning_truncated",
+       .expected_event = "response.incomplete"}};
 
   for (const Scenario& scenario : scenarios) {
     std::shared_ptr<const model_protocol::ModelProtocolProfile> profile =

@@ -20,6 +20,7 @@ limitations under the License.
 #include <filesystem>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "responses/fixture_loader.h"
 
@@ -87,6 +88,45 @@ TEST(RequestPreparerTest, NormalizesStringInputToGoldenSingleSequence) {
   EXPECT_EQ(prepared.profile_id, "fixture_responses");
   EXPECT_EQ(prepared.canonical_model_id, expected["model"].get<std::string>());
   EXPECT_EQ(prepared.context.request_id, "req_fixture");
+}
+
+TEST(RequestPreparerTest, AcceptsEveryCapturedCodexRequest) {
+  testing::FixtureCatalog fixtures =
+      testing::FixtureCatalog::load(kFixtureRoot);
+  const std::vector<std::string> paths = {
+      "requests/apply-patch-stream.json",
+      "requests/codex-tool-loop-start.json",
+      "requests/function-tool-output.json",
+      "requests/function-tool-stream.json",
+      "requests/plain-text-nonstream.json",
+      "requests/tool-loop-replay.json",
+  };
+
+  for (const std::string& path : paths) {
+    PrepareResult result = prepare(fixtures.wire(path).dump());
+    EXPECT_TRUE(result.ok()) << path << ": " << result.error().message;
+  }
+}
+
+TEST(RequestPreparerTest, AcceptsOnlyCapturedNoEffectShapes) {
+  const std::vector<std::pair<std::string, std::string>> rejected = {
+      {R"({"model":"fixture-model","input":"x","reasoning":{"effort":"medium","summary":"detailed"}})",
+       "reasoning.summary"},
+      {R"({"model":"fixture-model","input":"x","include":["reasoning.summary"]})",
+       "include"},
+      {R"({"model":"fixture-model","input":"x","prompt_cache_key":""})",
+       "prompt_cache_key"},
+      {R"({"model":"fixture-model","input":"x","client_metadata":{"other":"value"}})",
+       "client_metadata.other"},
+      {R"({"model":"fixture-model","input":"x","text":{"verbosity":"high"}})",
+       "text.verbosity"},
+      {R"({"model":"fixture-model","input":"x","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"other"}}]})",
+       "tools[0].format.definition"},
+  };
+
+  for (const auto& [body, param] : rejected) {
+    expect_error(body, ErrorCode::UNSUPPORTED_PARAMETER, param);
+  }
 }
 
 TEST(RequestPreparerTest, KeepsInstructionsAndDeveloperAsSystemMessages) {
@@ -161,6 +201,21 @@ TEST(RequestPreparerTest, RejectsUnsupportedFieldsAndPayloads) {
       {R"({"model":"fixture-model","input":[{"type":"other"}]})",
        ErrorCode::UNSUPPORTED_ITEM_TYPE,
        "input[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"additional_tools"}]})",
+       ErrorCode::UNSUPPORTED_ITEM_TYPE,
+       "input[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"image_generation_call"}]})",
+       ErrorCode::UNSUPPORTED_ITEM_TYPE,
+       "input[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"web_search_call"}]})",
+       ErrorCode::UNSUPPORTED_ITEM_TYPE,
+       "input[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"computer_call"}]})",
+       ErrorCode::UNSUPPORTED_ITEM_TYPE,
+       "input[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"file_search_call"}]})",
+       ErrorCode::UNSUPPORTED_ITEM_TYPE,
+       "input[0].type"},
       {R"({"model":"fixture-model","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"x"}]}]})",
        ErrorCode::UNSUPPORTED_CONTENT_TYPE,
        "input[0].content[0].type"},
@@ -171,6 +226,9 @@ TEST(RequestPreparerTest, RejectsUnsupportedFieldsAndPayloads) {
        ErrorCode::UNSUPPORTED_CONTENT_TYPE,
        "input[0].content[0].type"},
       {R"({"model":"fixture-model","input":[{"type":"message","role":"user","content":[{"type":"video","video_url":"x"}]}]})",
+       ErrorCode::UNSUPPORTED_CONTENT_TYPE,
+       "input[0].content[0].type"},
+      {R"({"model":"fixture-model","input":[{"type":"message","role":"user","content":[{"type":"refusal","refusal":"x"}]}]})",
        ErrorCode::UNSUPPORTED_CONTENT_TYPE,
        "input[0].content[0].type"},
       {R"({"model":"fixture-model","input":[{"type":"reasoning","summary":[{"text":"summary"}],"content":"x"}]})",
@@ -185,7 +243,7 @@ TEST(RequestPreparerTest, RejectsUnsupportedFieldsAndPayloads) {
       {R"({"model":"fixture-model","input":[{"type":"message","role":"tool","content":"x"}]})",
        ErrorCode::INVALID_REQUEST,
        "input[0].role"},
-      {R"({"model":"fixture-model","input":"x","reasoning":{"effort":"medium","summary":"auto"}})",
+      {R"({"model":"fixture-model","input":"x","reasoning":{"effort":"medium","summary":"detailed"}})",
        ErrorCode::UNSUPPORTED_PARAMETER,
        "reasoning.summary"},
   };
@@ -383,6 +441,18 @@ TEST(RequestPreparerTest, ValidatesToolDefinitionsChoicesAndLimits) {
       {R"(,"tools":[{"type":"web_search"}]})",
        ErrorCode::UNKNOWN_TOOL,
        "tools[0].type"},
+      {R"(,"tools":[{"type":"file_search"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].type"},
+      {R"(,"tools":[{"type":"code_interpreter"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].type"},
+      {R"(,"tools":[{"type":"computer_use"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].type"},
+      {R"(,"tools":[{"type":"mcp"}]})",
+       ErrorCode::UNKNOWN_TOOL,
+       "tools[0].type"},
       {R"(,"tools":[{"type":"function","name":"f","parameters":[]}]})",
        ErrorCode::INVALID_REQUEST,
        "tools[0].parameters"},
@@ -554,6 +624,11 @@ TEST(RequestPreparerTest, AppliesGenerationIntentToRequestParams) {
                                                        "max_tokens",
                                                        "presence_penalty",
                                                        "frequency_penalty",
+                                                       "metadata",
+                                                       "conversation",
+                                                       "background",
+                                                       "truncation",
+                                                       "user",
                                                        "top_k",
                                                        "repetition_penalty"};
   for (const std::string& field : unsupported_fields) {
