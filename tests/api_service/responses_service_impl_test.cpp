@@ -444,6 +444,49 @@ TEST(ResponsesServiceImplTest, StreamsFormalTerminalAndClosesExactlyOnce) {
   EXPECT_EQ(executor.cancel_count, 0);
 }
 
+TEST(ResponsesServiceImplTest, StreamsOtherProfileMarkerAsGlmText) {
+  const auto profile = model_protocol::make_glm_moe_dsa_profile();
+  RequestOutput reasoning;
+  reasoning.outputs.emplace_back(
+      SequenceOutput{.index = 0, .text = "</think>", .token_ids = {154842}});
+  RequestOutput text;
+  text.outputs.emplace_back(
+      SequenceOutput{.index = 0,
+                     .text = "Use `<｜DSML｜tool_calls>` literally.",
+                     .token_ids = {42}});
+  RequestOutput terminal;
+  terminal.outputs.emplace_back(SequenceOutput{.index = 0,
+                                               .text = "<|user|>",
+                                               .token_ids = {154827},
+                                               .finish_reason = "stop"});
+  terminal.usage = Usage{.num_prompt_tokens = 2,
+                         .num_generated_tokens = 3,
+                         .num_total_tokens = 5,
+                         .num_cached_tokens = 0};
+  terminal.finished = true;
+
+  FakeResponsesExecutor executor(
+      {std::move(reasoning), std::move(text), std::move(terminal)});
+  ResponsesServiceImpl service(responses::ResponsesLimits(),
+                               inline_executor_factory());
+  ASSERT_TRUE(service.add_model(context_for(profile->identity(), "glm-5.2"),
+                                &executor));
+  auto writer = std::make_shared<FakeStreamWriter>();
+  ASSERT_NE(service.process_stream(
+                R"({"model":"glm-5.2","input":"hi","stream":true})",
+                "application/json",
+                {},
+                writer,
+                [](ResponsesHttpResult /*unused*/) {}),
+            nullptr);
+
+  const std::string wire = joined_frames(*writer);
+  EXPECT_NE(wire.find("Use `<｜DSML｜tool_calls>` literally."),
+            std::string::npos);
+  EXPECT_NE(wire.find("event: response.completed"), std::string::npos);
+  EXPECT_EQ(wire.find("event: response.failed"), std::string::npos);
+}
+
 TEST(ResponsesServiceImplTest, SeparatesEarlyJsonFromOpenedStreamFailure) {
   const auto profile = model_protocol::make_deepseek_v4_profile();
   DeferredResponsesExecutor executor;

@@ -413,6 +413,94 @@ TEST(ModelOutputParserTest, KeepsOrdinaryLessThanAsText) {
   EXPECT_EQ(output[2].kind, OutputSegmentKind::TEXT_DONE);
 }
 
+TEST(ModelOutputParserTest, KeepsOtherProfileMarkersAcrossTextDeltas) {
+  const std::string text =
+      "Use `<｜DSML｜tool_calls>` and fenced:\n```\n"
+      "<｜DSML｜tool_calls>\n```";
+  const std::vector<OutputSegment> output =
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                   {{"</think>", {154842}},
+                    {"Use `<｜DS", {42}},
+                    {"ML｜tool_calls>` and fenced:\n```\n<｜DSML｜tool_", {43}},
+                    {"calls>\n```", {44}},
+                    {"<|user|>", {154827}}},
+                   "stop");
+
+  ASSERT_EQ(output.size(), 3);
+  EXPECT_EQ(output[0].kind, OutputSegmentKind::REASONING_DONE);
+  EXPECT_EQ(output[1].kind, OutputSegmentKind::TEXT_DELTA);
+  EXPECT_EQ(output[1].text, text);
+  EXPECT_EQ(output[2].kind, OutputSegmentKind::TEXT_DONE);
+}
+
+TEST(ModelOutputParserTest, KeepsUnrecognizedMarkupInTextFallback) {
+  const std::string text =
+      "<｜DSML｜tool_calls> <|unknown_control|> <tool_description> <div>";
+  const std::vector<OutputSegment> output =
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                   {{"</think>" + text, {}}},
+                   "stop");
+
+  ASSERT_EQ(output.size(), 2);
+  EXPECT_EQ(output[0].kind, OutputSegmentKind::REASONING_DONE);
+  EXPECT_EQ(output[1].kind, OutputSegmentKind::TEXT_DELTA);
+  EXPECT_EQ(output[1].text, text);
+
+  const std::string glm_marker = "Explain <tool_call> as text.";
+  const std::vector<OutputSegment> deepseek =
+      parse_chunks(make_deepseek_v4_profile()->new_parser(),
+                   {{"</think>" + glm_marker, {}}},
+                   "stop");
+  ASSERT_EQ(deepseek.size(), 2);
+  EXPECT_EQ(deepseek[1].kind, OutputSegmentKind::TEXT_DELTA);
+  EXPECT_EQ(deepseek[1].text, glm_marker);
+}
+
+TEST(ModelOutputParserTest, BindsToolAnchorToRightmostMarker) {
+  const std::string prefix = "Use <tool_call> literally. ";
+  const std::string raw =
+      "</think>" + prefix +
+      "<tool_call>lookup<arg_key>city</arg_key><arg_value>Beijing"
+      "</arg_value></tool_call><|observation|>";
+  const std::vector<OutputSegment> output =
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                   {{raw, {154842, 42, 154843, 43, 154829}}},
+                   "tool_calls");
+
+  ASSERT_EQ(output.size(), 6);
+  EXPECT_EQ(output[1].kind, OutputSegmentKind::TEXT_DELTA);
+  EXPECT_EQ(output[1].text, prefix);
+  EXPECT_EQ(output[2].kind, OutputSegmentKind::TEXT_DONE);
+  EXPECT_EQ(output[3].kind, OutputSegmentKind::FUNCTION_CALL_START);
+  EXPECT_EQ(output[3].name, "lookup");
+  EXPECT_EQ(output[4].text, R"({"city":"Beijing"})");
+  EXPECT_EQ(output[5].kind, OutputSegmentKind::FUNCTION_CALL_DONE);
+}
+
+TEST(ModelOutputParserTest, BindsMarkersWhenTextPrecedesTokens) {
+  const std::string prefix = "Use <tool_call> literally. ";
+  const std::string call =
+      "<tool_call>lookup<arg_key>city</arg_key><arg_value>Beijing"
+      "</arg_value></tool_call>";
+  const std::vector<OutputSegment> output =
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                   {{"</think>", {154842}},
+                    {prefix + call, {42}},
+                    {"", {154843, 43}},
+                    {"<|observation|>", {}},
+                    {"", {154829}}},
+                   "tool_calls");
+
+  ASSERT_EQ(output.size(), 6);
+  EXPECT_EQ(output[1].kind, OutputSegmentKind::TEXT_DELTA);
+  EXPECT_EQ(output[1].text, prefix);
+  EXPECT_EQ(output[2].kind, OutputSegmentKind::TEXT_DONE);
+  EXPECT_EQ(output[3].kind, OutputSegmentKind::FUNCTION_CALL_START);
+  EXPECT_EQ(output[3].name, "lookup");
+  EXPECT_EQ(output[4].text, R"({"city":"Beijing"})");
+  EXPECT_EQ(output[5].kind, OutputSegmentKind::FUNCTION_CALL_DONE);
+}
+
 TEST(ModelOutputParserTest, ParallelCallsAndToolContinuationsStayTyped) {
   const FixtureCatalog catalog = FixtureCatalog::load(fixture_root());
   for (const std::shared_ptr<const ModelProtocolProfile>& profile :
@@ -671,7 +759,7 @@ TEST(ModelOutputParserTest, HandlesReasoningTextAndEmptyShapes) {
   EXPECT_TRUE(empty.empty());
 }
 
-TEST(ModelOutputParserTest, RejectsInvalidUtf8AndUnknownControls) {
+TEST(ModelOutputParserTest, RejectsInvalidUtf8AndMalformedTools) {
   GenerationDelta invalid_utf8{.sequence_index = 0,
                                .generation_ordinal = 0,
                                .text_delta = std::string("\xc3\x28", 2)};
@@ -680,20 +768,6 @@ TEST(ModelOutputParserTest, RejectsInvalidUtf8AndUnknownControls) {
   ASSERT_EQ(invalid.size(), 1);
   ASSERT_EQ(invalid[0].kind, OutputSegmentKind::PARSE_FAILURE);
   EXPECT_EQ(invalid[0].failure->code, ParseFailureCode::INVALID_UTF8);
-
-  GenerationDelta unknown{.sequence_index = 0,
-                          .generation_ordinal = 0,
-                          .text_delta = "prefix<|unknown_control|>",
-                          .finished = true,
-                          .finish_reason = "stop"};
-  std::unique_ptr<ModelOutputParser> unknown_parser =
-      make_glm_moe_dsa_profile()->new_parser();
-  std::vector<OutputSegment> rejected = unknown_parser->consume(unknown);
-  append_segments(&rejected,
-                  unknown_parser->finalize(ParserTerminalReason::NORMAL));
-  ASSERT_EQ(rejected.back().kind, OutputSegmentKind::PARSE_FAILURE);
-  EXPECT_EQ(rejected.back().failure->code,
-            ParseFailureCode::UNKNOWN_CONTROL_TOKEN);
 
   GenerationDelta unknown_tool_grammar{
       .sequence_index = 0,
@@ -712,7 +786,7 @@ TEST(ModelOutputParserTest, RejectsInvalidUtf8AndUnknownControls) {
             ParseFailureCode::UNKNOWN_TOOL_GRAMMAR);
 }
 
-TEST(ModelOutputParserTest, TokenBoundariesAreAuthoritative) {
+TEST(ModelOutputParserTest, KeepsUnanchoredMarkerAsTokenBackedText) {
   GenerationDelta spoofed{.sequence_index = 0,
                           .generation_ordinal = 0,
                           .text_delta = "payload</think>",
@@ -724,9 +798,9 @@ TEST(ModelOutputParserTest, TokenBoundariesAreAuthoritative) {
   std::vector<OutputSegment> output = parser->consume(spoofed);
   append_segments(&output, parser->finalize(ParserTerminalReason::NORMAL));
 
-  ASSERT_EQ(output.back().kind, OutputSegmentKind::PARSE_FAILURE);
-  EXPECT_EQ(output.back().failure->code,
-            ParseFailureCode::CONTROL_TOKEN_MISMATCH);
+  ASSERT_EQ(output.size(), 1);
+  EXPECT_EQ(output[0].kind, OutputSegmentKind::REASONING_DELTA);
+  EXPECT_EQ(output[0].text, "payload</think>");
 }
 
 TEST(ModelOutputParserTest, RejectsSequenceMixingAndBackendErrors) {

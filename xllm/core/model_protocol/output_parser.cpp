@@ -111,13 +111,6 @@ bool whitespace_only(std::string_view text) {
   });
 }
 
-bool reserved_control_format(std::string_view text) {
-  return text.starts_with("<|") || text.starts_with("<｜") ||
-         text.starts_with("</｜") || text.starts_with("<tool_") ||
-         text.starts_with("</tool_") || text.starts_with("<arg_") ||
-         text.starts_with("</arg_");
-}
-
 std::string trim(std::string_view text) {
   size_t begin = 0;
   while (begin < text.size() &&
@@ -327,8 +320,6 @@ class TextReasoningParser final : public ModelOutputParser {
     token_tail_.clear();
   }
 
-  void discard_marker() { token_tail_.clear(); }
-
   void inspect_tokens(const std::vector<int32_t>& tokens) {
     const size_t max_sequence = std::max({grammar_.reasoning_end_tokens.size(),
                                           grammar_.text_end_tokens.size(),
@@ -344,16 +335,9 @@ class TextReasoningParser final : public ModelOutputParser {
       if (!grammar_.tool_done_tokens.empty() &&
           ends_with(grammar_.tool_done_tokens)) {
         record_marker(MarkerKind::TOOL_DONE, grammar_.tool_done_tokens);
-        token_in_tool_ = false;
       } else if (!grammar_.tool_open_tokens.empty() &&
                  ends_with(grammar_.tool_open_tokens)) {
-        if (token_in_tool_) {
-          // Parallel GLM calls repeat tool-open without changing parser state.
-          discard_marker();
-        } else {
-          record_marker(MarkerKind::TOOL_OPEN, grammar_.tool_open_tokens);
-          token_in_tool_ = true;
-        }
+        record_marker(MarkerKind::TOOL_OPEN, grammar_.tool_open_tokens);
       } else if (!grammar_.reasoning_end_tokens.empty() &&
                  ends_with(grammar_.reasoning_end_tokens)) {
         record_marker(MarkerKind::REASONING_END, grammar_.reasoning_end_tokens);
@@ -414,6 +398,58 @@ class TextReasoningParser final : public ModelOutputParser {
       return std::string(kGlmCallsDone);
     }
     return grammar_.text_end;
+  }
+
+  std::string marker_text(MarkerKind kind) const {
+    switch (kind) {
+      case MarkerKind::REASONING_END:
+        return grammar_.reasoning_end;
+      case MarkerKind::TEXT_END:
+        return grammar_.text_end;
+      case MarkerKind::TOOL_OPEN:
+        return tool_open();
+      case MarkerKind::TOOL_DONE:
+        return tool_done();
+    }
+    return "";
+  }
+
+  std::vector<size_t> anchor_positions() const {
+    std::vector<size_t> positions(token_markers_.size(), std::string::npos);
+    size_t search_end = pending_.size();
+    // Newest anchors claim the rightmost matching marker text.
+    for (size_t index = token_markers_.size(); index > 0; --index) {
+      const std::string marker = marker_text(token_markers_[index - 1]);
+      if (marker.empty() || marker.size() > search_end) {
+        return {};
+      }
+      const size_t pos = pending_.rfind(marker, search_end - marker.size());
+      if (pos == std::string::npos) {
+        return {};
+      }
+      positions[index - 1] = pos;
+      search_end = pos;
+    }
+    return positions;
+  }
+
+  size_t anchored_pos() const {
+    const std::vector<size_t> positions = anchor_positions();
+    return positions.empty() ? std::string::npos : positions.front();
+  }
+
+  size_t unresolved_pos() const {
+    size_t first_pos = std::string::npos;
+    for (MarkerKind kind : {MarkerKind::REASONING_END,
+                            MarkerKind::TEXT_END,
+                            MarkerKind::TOOL_OPEN,
+                            MarkerKind::TOOL_DONE}) {
+      const std::string marker = marker_text(kind);
+      if (!marker.empty()) {
+        first_pos = std::min(first_pos, pending_.find(marker));
+      }
+    }
+    return first_pos;
   }
 
   size_t ambiguous_suffix() const {
@@ -732,12 +768,35 @@ class TextReasoningParser final : public ModelOutputParser {
 
   bool parse_tools(std::vector<OutputSegment>* output) {
     const std::string done_marker = tool_done();
-    const size_t done_pos = pending_.find(done_marker);
+    size_t done_pos = pending_.find(done_marker);
+    size_t done_index = 0;
+    if (token_boundaries_) {
+      const auto done = std::find(
+          token_markers_.begin(), token_markers_.end(), MarkerKind::TOOL_DONE);
+      const std::vector<size_t> positions = anchor_positions();
+      if (done == token_markers_.end() || positions.empty()) {
+        done_pos = std::string::npos;
+      } else {
+        done_index =
+            static_cast<size_t>(std::distance(token_markers_.begin(), done));
+        if (std::any_of(token_markers_.begin(), done, [](MarkerKind kind) {
+              return kind != MarkerKind::TOOL_OPEN;
+            })) {
+          set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
+                      "tool control markers are out of order");
+          return false;
+        }
+        done_pos = positions[done_index];
+      }
+    }
     if (done_pos == std::string::npos) {
       return false;
     }
-    if (!accept_marker(MarkerKind::TOOL_DONE,
-                       finalized_ && !token_boundaries_)) {
+    if (token_boundaries_) {
+      token_markers_.erase(token_markers_.begin(),
+                           token_markers_.begin() + done_index + 1);
+    } else if (!accept_marker(MarkerKind::TOOL_DONE,
+                              finalized_ && !token_boundaries_)) {
       return false;
     }
     const std::string body = pending_.substr(0, done_pos);
@@ -786,11 +845,29 @@ class TextReasoningParser final : public ModelOutputParser {
       const std::string marker = state_ == ParseState::REASONING
                                      ? grammar_.reasoning_end
                                      : grammar_.text_end;
-      const size_t marker_pos = pending_.find(marker);
+      size_t marker_pos = pending_.find(marker);
+      size_t tool_pos = std::string::npos;
+      if (token_boundaries_) {
+        marker_pos = std::string::npos;
+        if (!token_markers_.empty()) {
+          const MarkerKind next = token_markers_.front();
+          const size_t anchor_pos = anchored_pos();
+          if ((state_ == ParseState::REASONING &&
+               next == MarkerKind::REASONING_END) ||
+              (state_ == ParseState::TEXT && next == MarkerKind::TEXT_END)) {
+            marker_pos = anchor_pos;
+          } else if (state_ == ParseState::TEXT &&
+                     next == MarkerKind::TOOL_OPEN) {
+            tool_pos = anchor_pos;
+          }
+        }
+      }
       if (state_ == ParseState::TEXT &&
           grammar_.tool.dialect != ToolGrammarDialect::NONE) {
         const std::string open = tool_open();
-        const size_t tool_pos = pending_.find(open);
+        if (!token_boundaries_) {
+          tool_pos = pending_.find(open);
+        }
         if (tool_pos != std::string::npos &&
             (marker_pos == std::string::npos || tool_pos < marker_pos)) {
           if (!accept_marker(MarkerKind::TOOL_OPEN,
@@ -845,21 +922,14 @@ class TextReasoningParser final : public ModelOutputParser {
           }
         }
       }
-      const size_t safe_size = flush ? pending_.size() : ambiguous_suffix();
+      size_t safe_size = flush ? pending_.size() : ambiguous_suffix();
+      if (token_boundaries_) {
+        safe_size = std::min(safe_size, unresolved_pos());
+      }
       if (safe_size == 0) {
         return;
       }
       const std::string payload = pending_.substr(0, safe_size);
-      size_t control_pos = payload.find('<');
-      while (control_pos != std::string::npos) {
-        if (reserved_control_format(
-                std::string_view(payload).substr(control_pos))) {
-          set_failure(ParseFailureCode::UNKNOWN_CONTROL_TOKEN,
-                      "generation contains an unsupported control marker");
-          return;
-        }
-        control_pos = payload.find('<', control_pos + 1);
-      }
       emit_payload(output, payload, incomplete);
       if (state_ == ParseState::TEXT && !payload.empty()) {
         text_started_ = true;
@@ -909,7 +979,6 @@ class TextReasoningParser final : public ModelOutputParser {
   bool token_boundaries_ = false;
   bool text_started_ = false;
   bool reasoning_tokens_done_ = false;
-  bool token_in_tool_ = false;
   int32_t reasoning_tokens_ = 0;
   std::vector<int32_t> token_tail_;
   std::vector<MarkerKind> token_markers_;
