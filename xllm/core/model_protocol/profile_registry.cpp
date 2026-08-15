@@ -22,13 +22,7 @@ namespace {
 
 bool identity_matches(const ModelProtocolIdentity& identity,
                       const LoadedModelContext& context) {
-  return identity.model_type == context.model_type &&
-         identity.model_fingerprint == context.model_fingerprint &&
-         identity.tokenizer_id == context.tokenizer_id &&
-         identity.tokenizer_fingerprint == context.tokenizer_fingerprint &&
-         identity.tokenizer_config_fingerprint ==
-             context.tokenizer_config_fingerprint &&
-         identity.template_id == context.template_id &&
+  return identity.tokenizer_fingerprint == context.tokenizer_fingerprint &&
          identity.template_fingerprint == context.template_fingerprint;
 }
 
@@ -48,27 +42,18 @@ ProfileResult::ProfileResult(ModelProtocolError error)
 ModelProtocolError ProfileRegistry::add(
     std::shared_ptr<const ModelProtocolProfile> profile) {
   const ModelProtocolIdentity& identity = profile->identity();
-  if (profiles_.contains(identity.canonical_model_id)) {
+  if (profiles_.contains(identity.model_type)) {
     return {ModelProtocolErrorCode::DUPLICATE_PROFILE_IDENTITY,
-            "duplicate canonical model identity"};
-  }
-  for (const std::string& alias : identity.model_aliases) {
-    if (profiles_.contains(alias)) {
-      return {ModelProtocolErrorCode::DUPLICATE_PROFILE_IDENTITY,
-              "duplicate model alias"};
-    }
+            "duplicate model type profile"};
   }
 
-  profiles_.emplace(identity.canonical_model_id, profile);
-  for (const std::string& alias : identity.model_aliases) {
-    profiles_.emplace(alias, profile);
-  }
+  profiles_.emplace(identity.model_type, profile);
   return {};
 }
 
 ProfileResult ProfileRegistry::resolve(
     const LoadedModelContext& context) const {
-  auto it = profiles_.find(context.model_id);
+  auto it = profiles_.find(context.model_type);
   if (it == profiles_.end()) {
     return ProfileResult(
         ModelProtocolError(ModelProtocolErrorCode::UNSUPPORTED_MODEL_CAPABILITY,

@@ -122,12 +122,13 @@ TEST(TypedProtocolTest, FoundationCarriesTypedErrorLimitsAndPreparedRequest) {
   request.model = "fake/model";
   PreparedRequest prepared;
   prepared.profile_id = "fake_responses";
-  prepared.canonical_model_id = "fake/model";
+  prepared.model_id = "fake/model";
 
   EXPECT_EQ(error.code, ErrorCode::UNSUPPORTED_MODEL_CAPABILITY);
   EXPECT_EQ(limits.max_input_items, 4096);
   EXPECT_EQ(request.model, "fake/model");
   EXPECT_EQ(prepared.profile_id, "fake_responses");
+  EXPECT_EQ(prepared.model_id, "fake/model");
 
   model_protocol::ModelProtocolError protocol_error(
       model_protocol::ModelProtocolErrorCode::UNSUPPORTED_MODEL_CAPABILITY,

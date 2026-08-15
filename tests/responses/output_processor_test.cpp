@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/model_protocol/deepseek_v4_profile.h"
-#include "core/model_protocol/glm_5_2_profile.h"
+#include "core/model_protocol/glm_moe_dsa_profile.h"
 #include "core/model_protocol/output_parser.h"
 #include "responses/fixture_loader.h"
 #include "responses/json_encoder.h"
@@ -93,7 +93,7 @@ std::unique_ptr<model_protocol::ModelOutputParser> parser_for(
   if (profile == "deepseek_v4_responses") {
     return model_protocol::make_deepseek_v4_profile()->new_parser();
   }
-  return model_protocol::make_glm_5_2_profile()->new_parser();
+  return model_protocol::make_glm_moe_dsa_profile()->new_parser();
 }
 
 nlohmann::json normalized_items(nlohmann::json items) {

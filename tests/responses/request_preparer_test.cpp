@@ -32,10 +32,8 @@ const std::filesystem::path kFixtureRoot =
 
 model_protocol::ModelProtocolIdentity fixture_identity() {
   return {.profile_id = "fixture_responses",
-          .canonical_model_id = "fixture-model",
-          .model_aliases = {"fixture-alias"},
-          .tokenizer_id = "fixture-tokenizer",
-          .template_id = "fixture-template",
+          .model_type = "fixture-type",
+          .tokenizer_fingerprint = "fixture-tokenizer-fingerprint",
           .template_fingerprint = "fixture-fingerprint"};
 }
 
@@ -43,6 +41,7 @@ PrepareResult prepare(const std::string& body,
                       ResponsesLimits limits = ResponsesLimits()) {
   return prepare_request(
       body,
+      "fixture-model",
       fixture_identity(),
       {.request_id = "req_fixture", .trace_id = "trace_fixture"},
       limits);
@@ -86,7 +85,7 @@ TEST(RequestPreparerTest, NormalizesStringInputToGoldenSingleSequence) {
   EXPECT_EQ(prepared.chat_request.output_decoding_policy(),
             proto::PROTOCOL_RAW);
   EXPECT_EQ(prepared.profile_id, "fixture_responses");
-  EXPECT_EQ(prepared.canonical_model_id, expected["model"].get<std::string>());
+  EXPECT_EQ(prepared.model_id, expected["model"].get<std::string>());
   EXPECT_EQ(prepared.context.request_id, "req_fixture");
 }
 
@@ -131,7 +130,7 @@ TEST(RequestPreparerTest, AcceptsOnlyCapturedNoEffectShapes) {
 
 TEST(RequestPreparerTest, KeepsInstructionsAndDeveloperAsSystemMessages) {
   PrepareResult result = prepare(R"({
-    "model":"fixture-alias",
+    "model":"fixture-model",
     "instructions":"first",
     "input":[
       {"type":"message","role":"developer","content":"second"},

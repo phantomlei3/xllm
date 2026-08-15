@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/model_protocol/deepseek_v4_profile.h"
-#include "core/model_protocol/glm_5_2_profile.h"
+#include "core/model_protocol/glm_moe_dsa_profile.h"
 
 namespace xllm::model_protocol {
 namespace {
@@ -39,14 +39,8 @@ class FakeProfile final : public ModelProtocolProfile {
  public:
   FakeProfile()
       : identity_{.profile_id = "fake_responses",
-                  .canonical_model_id = "fake/model",
-                  .model_aliases = {"fake-alias"},
                   .model_type = "fake-type",
-                  .model_fingerprint = "sha256:fake-model",
-                  .tokenizer_id = "fake-tokenizer",
                   .tokenizer_fingerprint = "sha256:fake-tokenizer",
-                  .tokenizer_config_fingerprint = "sha256:fake-config",
-                  .template_id = "fake-template",
                   .template_fingerprint = "sha256:fake"},
         capabilities_{.preserves_reasoning = true,
                       .supports_function_tools = true,
@@ -92,54 +86,58 @@ class FakeProfile final : public ModelProtocolProfile {
 LoadedModelContext make_context(const std::string& model_id) {
   return {.model_id = model_id,
           .model_type = "fake-type",
-          .model_fingerprint = "sha256:fake-model",
-          .tokenizer_id = "fake-tokenizer",
           .tokenizer_fingerprint = "sha256:fake-tokenizer",
-          .tokenizer_config_fingerprint = "sha256:fake-config",
-          .template_id = "fake-template",
           .template_fingerprint = "sha256:fake"};
 }
 
-TEST(ProfileRegistryTest, ResolvesCanonicalModelAndControlledAlias) {
+TEST(ProfileRegistryTest, ResolvesByModelTypeRegardlessOfPublicId) {
   ProfileRegistry registry;
   ASSERT_TRUE(registry.add(std::make_shared<FakeProfile>()).ok());
 
-  ProfileResult canonical = registry.resolve(make_context("fake/model"));
-  ASSERT_TRUE(canonical.ok());
-  EXPECT_EQ(canonical.profile()->identity().profile_id, "fake_responses");
-
-  ProfileResult alias = registry.resolve(make_context("fake-alias"));
-  ASSERT_TRUE(alias.ok());
-  EXPECT_EQ(alias.profile()->identity().canonical_model_id, "fake/model");
-  EXPECT_TRUE(alias.profile()->capabilities().preserves_reasoning);
-  EXPECT_TRUE(alias.profile()->capabilities().supports_function_tools);
-  EXPECT_TRUE(alias.profile()->capabilities().supports_apply_patch);
-  EXPECT_TRUE(alias.profile()->capabilities().supports_reasoning_stream);
-  EXPECT_TRUE(alias.profile()->capabilities().supports_raw_decode);
-  EXPECT_EQ(alias.profile()->raw_decoding().policy,
+  ProfileResult result = registry.resolve(make_context("deployment-name"));
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.profile()->identity().profile_id, "fake_responses");
+  EXPECT_TRUE(result.profile()->capabilities().preserves_reasoning);
+  EXPECT_TRUE(result.profile()->capabilities().supports_function_tools);
+  EXPECT_TRUE(result.profile()->capabilities().supports_apply_patch);
+  EXPECT_TRUE(result.profile()->capabilities().supports_reasoning_stream);
+  EXPECT_TRUE(result.profile()->capabilities().supports_raw_decode);
+  EXPECT_EQ(result.profile()->raw_decoding().policy,
             OutputDecodingPolicy::PROTOCOL_RAW);
-  EXPECT_NE(alias.profile()->new_parser(), nullptr);
-  EXPECT_EQ(alias.profile()->default_effort(), ReasoningEffort::MEDIUM);
-  EXPECT_EQ(alias.profile()
+  EXPECT_NE(result.profile()->new_parser(), nullptr);
+  EXPECT_EQ(result.profile()->default_effort(), ReasoningEffort::MEDIUM);
+  EXPECT_EQ(result.profile()
                 ->resolve_template(ThinkingHistoryPolicy::PRESERVE)
                 .thinking_history,
             ThinkingHistoryPolicy::PRESERVE);
-  SamplingPolicy sampling = alias.profile()->resolve_sampling(
+  SamplingPolicy sampling = result.profile()->resolve_sampling(
       ReasoningEffort::HIGH, /*temperature=*/0.4f, /*top_p=*/0.8f);
   EXPECT_EQ(sampling.effort, ReasoningEffort::HIGH);
   EXPECT_FLOAT_EQ(sampling.temperature, 0.4f);
   EXPECT_FLOAT_EQ(sampling.top_p, 0.8f);
 }
 
-TEST(ProfileRegistryTest, UnknownModelReturnsTypedCapabilityError) {
+TEST(ProfileRegistryTest, UnknownModelTypeReturnsTypedCapabilityError) {
   ProfileRegistry registry;
   ASSERT_TRUE(registry.add(std::make_shared<FakeProfile>()).ok());
+  LoadedModelContext context = make_context("deployment-name");
+  context.model_type = "unknown-type";
 
-  ProfileResult result = registry.resolve(make_context("unknown/model"));
+  ProfileResult result = registry.resolve(context);
 
   ASSERT_FALSE(result.ok());
   EXPECT_EQ(result.error().code(),
             ModelProtocolErrorCode::UNSUPPORTED_MODEL_CAPABILITY);
+}
+
+TEST(ProfileRegistryTest, RejectsDuplicateModelType) {
+  ProfileRegistry registry;
+  ASSERT_TRUE(registry.add(std::make_shared<FakeProfile>()).ok());
+
+  ModelProtocolError error = registry.add(std::make_shared<FakeProfile>());
+
+  ASSERT_FALSE(error.ok());
+  EXPECT_EQ(error.code(), ModelProtocolErrorCode::DUPLICATE_PROFILE_IDENTITY);
 }
 
 TEST(ProfileRegistryTest, IdentityMismatchReturnsDeploymentError) {
@@ -159,18 +157,9 @@ LoadedModelContext make_deepseek_context() {
   return {
       .model_id = "deepseek-v4",
       .model_type = "deepseek_v4",
-      .model_fingerprint =
-          "sha256:"
-          "333f773ad8f613d632293ad4da456df7620074f905705c0e5270b42b4031c9a4",
-      .tokenizer_id = "/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa",
       .tokenizer_fingerprint =
           "sha256:"
           "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
-      .tokenizer_config_fingerprint =
-          "sha256:"
-          "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
-      .template_id =
-          "xllm/core/framework/chat_template/deepseek_v4_cpp_template.cpp",
       .template_fingerprint =
           "sha256:"
           "a06d98abfe8e4d78d2505ca28464e6b4af203731d6c07ee1ca9c4ab1bd77f95b"};
@@ -228,17 +217,9 @@ LoadedModelContext make_glm_context() {
   return {
       .model_id = "GLM-5-W4A8",
       .model_type = "glm_moe_dsa",
-      .model_fingerprint =
-          "sha256:"
-          "0e4c1649072dda2d1c3f91196b33f390a3605e3732466dfb9e28ac4cdd2e91f5",
-      .tokenizer_id = "/ds_models/GLM-5.2-W4A8",
       .tokenizer_fingerprint =
           "sha256:"
           "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
-      .tokenizer_config_fingerprint =
-          "sha256:"
-          "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc",
-      .template_id = "/ds_models/GLM-5.2-W4A8/chat_template.jinja",
       .template_fingerprint =
           "sha256:"
           "172dc74a35e1752df75ecfb2b2cf9326d2852bb1379868ebeec9571654489679"};
@@ -246,15 +227,16 @@ LoadedModelContext make_glm_context() {
 
 TEST(ProfileRegistryTest, GlmRequiresCompleteFrozenIdentity) {
   ProfileRegistry registry;
-  ASSERT_TRUE(registry.add(make_glm_5_2_profile()).ok());
+  ASSERT_TRUE(registry.add(make_glm_moe_dsa_profile()).ok());
 
   ProfileResult result = registry.resolve(make_glm_context());
 
   ASSERT_TRUE(result.ok());
-  EXPECT_EQ(result.profile()->identity().profile_id, "glm_5_2_responses");
+  EXPECT_EQ(result.profile()->identity().profile_id, "glm_moe_dsa_responses");
   EXPECT_EQ(result.profile()->raw_decoding().policy,
             OutputDecodingPolicy::PROTOCOL_RAW);
-  EXPECT_EQ(result.profile()->raw_decoding().parser_dialect, "glm_5_2_native");
+  EXPECT_EQ(result.profile()->raw_decoding().parser_dialect,
+            "glm_moe_dsa_native");
   EXPECT_EQ(result.profile()->raw_decoding().max_marker_bytes, 15);
   EXPECT_EQ(result.profile()->raw_decoding().preserved_token_ids,
             std::vector<int64_t>({154820,
@@ -287,7 +269,8 @@ TEST(ProfileRegistryTest, GlmRequiresCompleteFrozenIdentity) {
 }
 
 TEST(ProfileRegistryTest, GlmMapsEffortAndSampling) {
-  std::shared_ptr<const ModelProtocolProfile> profile = make_glm_5_2_profile();
+  std::shared_ptr<const ModelProtocolProfile> profile =
+      make_glm_moe_dsa_profile();
 
   SamplingPolicy low = profile->resolve_sampling(
       ReasoningEffort::MINIMAL, /*temperature=*/0.2f, /*top_p=*/0.4f);

@@ -27,25 +27,15 @@ namespace xllm::model_protocol {
 
 struct ModelProtocolIdentity {
   std::string profile_id;
-  std::string canonical_model_id;
-  std::vector<std::string> model_aliases;
   std::string model_type;
-  std::string model_fingerprint;
-  std::string tokenizer_id;
   std::string tokenizer_fingerprint;
-  std::string tokenizer_config_fingerprint;
-  std::string template_id;
   std::string template_fingerprint;
 };
 
 struct LoadedModelContext {
   std::string model_id;
   std::string model_type;
-  std::string model_fingerprint;
-  std::string tokenizer_id;
   std::string tokenizer_fingerprint;
-  std::string tokenizer_config_fingerprint;
-  std::string template_id;
   std::string template_fingerprint;
 };
 

@@ -117,14 +117,15 @@ class ResponsesServiceImpl final {
       Completion early_completion) const;
 
  private:
-  struct Backend {
+  struct ModelDeploymentBinding {
+    std::string model_id;
     std::shared_ptr<const model_protocol::ModelProtocolProfile> profile;
     ResponsesExecutor* executor;
   };
 
   model_protocol::ProfileRegistry registry_;
   responses::ResponsesLimits limits_;
-  std::unordered_map<std::string, Backend> backends_;
+  std::unordered_map<std::string, ModelDeploymentBinding> deployments_;
   std::vector<std::unique_ptr<ResponsesExecutor>> owned_executors_;
   std::optional<std::string> deployment_error_;
   std::shared_ptr<ThreadPool> stream_pool_;

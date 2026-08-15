@@ -120,7 +120,7 @@ struct PreparedRequest {
   std::vector<InputItem> canonical_input;
   ResponsesOptions options;
   std::string profile_id;
-  std::string canonical_model_id;
+  std::string model_id;
   RequestContext context;
   uint32_t sequence_count = 1;
 };

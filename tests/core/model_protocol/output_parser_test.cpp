@@ -27,7 +27,7 @@ limitations under the License.
 
 #include "core/model_protocol/deepseek_v4_profile.h"
 #include "core/model_protocol/generation_delta.h"
-#include "core/model_protocol/glm_5_2_profile.h"
+#include "core/model_protocol/glm_moe_dsa_profile.h"
 #include "responses/fixture_loader.h"
 
 namespace xllm::model_protocol {
@@ -201,13 +201,13 @@ TEST(ModelOutputParserTest, FrozenTextFixturesAreChunkInvariant) {
   const FixtureCatalog catalog = FixtureCatalog::load(fixture_root());
 
   expect_fixture_chunk_invariance(catalog, make_deepseek_v4_profile());
-  expect_fixture_chunk_invariance(catalog, make_glm_5_2_profile());
+  expect_fixture_chunk_invariance(catalog, make_glm_moe_dsa_profile());
 }
 
 TEST(ModelOutputParserTest, FrozenToolFixturesHaveTypedLifecycles) {
   const FixtureCatalog catalog = FixtureCatalog::load(fixture_root());
   for (const std::shared_ptr<const ModelProtocolProfile>& profile :
-       {make_deepseek_v4_profile(), make_glm_5_2_profile()}) {
+       {make_deepseek_v4_profile(), make_glm_moe_dsa_profile()}) {
     const RawFixture function_raw = load_raw(
         catalog, profile->identity().profile_id, "reasoning_function_call");
     const std::vector<OutputSegment> function = call_segments(
@@ -242,7 +242,7 @@ TEST(ModelOutputParserTest, FrozenToolFixturesHaveTypedLifecycles) {
 TEST(ModelOutputParserTest, ParallelCallsAndToolContinuationsStayTyped) {
   const FixtureCatalog catalog = FixtureCatalog::load(fixture_root());
   for (const std::shared_ptr<const ModelProtocolProfile>& profile :
-       {make_deepseek_v4_profile(), make_glm_5_2_profile()}) {
+       {make_deepseek_v4_profile(), make_glm_moe_dsa_profile()}) {
     const RawFixture parallel = load_raw(
         catalog, profile->identity().profile_id, "parallel_function_calls");
     const std::vector<OutputSegment> calls =
@@ -276,7 +276,7 @@ TEST(ModelOutputParserTest, ParallelCallsAndToolContinuationsStayTyped) {
 TEST(ModelOutputParserTest, ToolFixturesAreCharacterChunkInvariant) {
   const FixtureCatalog catalog = FixtureCatalog::load(fixture_root());
   for (const std::shared_ptr<const ModelProtocolProfile>& profile :
-       {make_deepseek_v4_profile(), make_glm_5_2_profile()}) {
+       {make_deepseek_v4_profile(), make_glm_moe_dsa_profile()}) {
     for (const std::string& scenario :
          {"parallel_function_calls", "reasoning_apply_patch"}) {
       const RawFixture raw =
@@ -314,9 +314,11 @@ TEST(ModelOutputParserTest, FunctionJsonKeepsEscapeUnicodeAndNesting) {
       "</think><tool_call>lookup<arg_key>config</arg_key><arg_value>" + value +
       "</arg_value></tool_call><|observation|>";
   const std::vector<OutputSegment> whole = call_segments(parse_chunks(
-      make_glm_5_2_profile()->new_parser(), {{raw, {}}}, "tool_calls"));
-  const std::vector<OutputSegment> split = call_segments(parse_chunks(
-      make_glm_5_2_profile()->new_parser(), byte_chunks(raw), "tool_calls"));
+      make_glm_moe_dsa_profile()->new_parser(), {{raw, {}}}, "tool_calls"));
+  const std::vector<OutputSegment> split =
+      call_segments(parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                                 byte_chunks(raw),
+                                 "tool_calls"));
   ASSERT_EQ(whole.size(), 3);
   EXPECT_EQ(whole, split);
   EXPECT_EQ(whole[1].text,
@@ -330,7 +332,7 @@ TEST(ModelOutputParserTest, PatchKeepsControlLikeTextVerbatim) {
       "</think><tool_call>apply_patch<arg_key>patch</arg_key><arg_value>" +
       input + "</arg_value></tool_call><|observation|>";
   const std::vector<OutputSegment> calls = call_segments(parse_chunks(
-      make_glm_5_2_profile()->new_parser(), {{raw, {}}}, "tool_calls"));
+      make_glm_moe_dsa_profile()->new_parser(), {{raw, {}}}, "tool_calls"));
   ASSERT_EQ(calls.size(), 3);
   EXPECT_EQ(calls[1].kind, OutputSegmentKind::CUSTOM_INPUT_DELTA);
   EXPECT_EQ(calls[1].text, input);
@@ -353,8 +355,10 @@ TEST(ModelOutputParserTest, RejectsMalformedAndUnclosedCallsWithoutDone) {
   const std::string malformed =
       "</think><tool_call>lookup<arg_key>config</arg_key><arg_value>"
       "{\"broken\"</arg_value></tool_call><|observation|>";
-  std::vector<OutputSegment> invalid = parse_chunks(
-      make_glm_5_2_profile()->new_parser(), {{malformed, {}}}, "tool_calls");
+  std::vector<OutputSegment> invalid =
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
+                   {{malformed, {}}},
+                   "tool_calls");
   ASSERT_EQ(invalid.back().kind, OutputSegmentKind::PARSE_FAILURE);
   EXPECT_EQ(invalid.back().failure->code,
             ParseFailureCode::INVALID_TOOL_ARGUMENTS);
@@ -369,7 +373,7 @@ TEST(ModelOutputParserTest, RejectsMalformedAndUnclosedCallsWithoutDone) {
   const std::string unclosed =
       "</think><tool_call>lookup<arg_key>city</arg_key><arg_value>Beijing";
   std::vector<OutputSegment> unfinished = parse_chunks(
-      make_glm_5_2_profile()->new_parser(), {{unclosed, {}}}, "stop");
+      make_glm_moe_dsa_profile()->new_parser(), {{unclosed, {}}}, "stop");
   ASSERT_EQ(unfinished.back().kind, OutputSegmentKind::PARSE_FAILURE);
   EXPECT_EQ(unfinished.back().failure->code,
             ParseFailureCode::UNCLOSED_TOOL_CALL);
@@ -455,7 +459,7 @@ TEST(ModelOutputParserTest, HandlesReasoningTextAndEmptyShapes) {
   EXPECT_TRUE(reasoning[0].incomplete);
 
   std::vector<OutputSegment> text =
-      parse_chunks(make_glm_5_2_profile()->new_parser(),
+      parse_chunks(make_glm_moe_dsa_profile()->new_parser(),
                    {{"</think>visible<|user|>", {154842, 100, 154827}}},
                    "stop");
   ASSERT_EQ(text.size(), 3);
@@ -485,7 +489,7 @@ TEST(ModelOutputParserTest, RejectsInvalidUtf8AndUnknownControls) {
                           .finished = true,
                           .finish_reason = "stop"};
   std::vector<OutputSegment> rejected =
-      make_glm_5_2_profile()->new_parser()->consume(unknown);
+      make_glm_moe_dsa_profile()->new_parser()->consume(unknown);
   ASSERT_EQ(rejected.back().kind, OutputSegmentKind::PARSE_FAILURE);
   EXPECT_EQ(rejected.back().failure->code,
             ParseFailureCode::UNKNOWN_CONTROL_TOKEN);
@@ -497,7 +501,7 @@ TEST(ModelOutputParserTest, RejectsInvalidUtf8AndUnknownControls) {
       .finished = true,
       .finish_reason = "tool_calls"};
   std::vector<OutputSegment> grammar_rejected =
-      make_glm_5_2_profile()->new_parser()->consume(unknown_tool_grammar);
+      make_glm_moe_dsa_profile()->new_parser()->consume(unknown_tool_grammar);
   ASSERT_EQ(grammar_rejected.back().kind, OutputSegmentKind::PARSE_FAILURE);
   EXPECT_EQ(grammar_rejected.back().failure->code,
             ParseFailureCode::UNKNOWN_TOOL_GRAMMAR);
@@ -535,7 +539,7 @@ TEST(ModelOutputParserTest, RejectsSequenceMixingAndBackendErrors) {
                           .backend_error = BackendError{.code = "worker_failed",
                                                         .message = "failed"}};
   std::vector<OutputSegment> failed =
-      make_glm_5_2_profile()->new_parser()->consume(backend);
+      make_glm_moe_dsa_profile()->new_parser()->consume(backend);
   ASSERT_EQ(failed.size(), 1);
   EXPECT_EQ(failed[0].failure->code, ParseFailureCode::BACKEND_ERROR);
 }

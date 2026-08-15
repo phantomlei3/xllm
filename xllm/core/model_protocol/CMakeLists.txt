@@ -6,7 +6,7 @@ cc_library(
   HDRS
     deepseek_v4_profile.h
     generation_delta.h
-    glm_5_2_profile.h
+    glm_moe_dsa_profile.h
     output_parser.h
     policy.h
     profile.h
@@ -14,7 +14,7 @@ cc_library(
   SRCS
     deepseek_v4_profile.cpp
     generation_delta.cpp
-    glm_5_2_profile.cpp
+    glm_moe_dsa_profile.cpp
     output_parser.cpp
     profile_registry.cpp
   DEPS

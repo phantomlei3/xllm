@@ -21,9 +21,9 @@ limitations under the License.
 
 namespace xllm::model_protocol {
 
-class Glm52Profile final : public ModelProtocolProfile {
+class GlmMoeDsaProfile final : public ModelProtocolProfile {
  public:
-  Glm52Profile();
+  GlmMoeDsaProfile();
 
   const ModelProtocolIdentity& identity() const override;
   const ModelProtocolCapabilities& capabilities() const override;
@@ -42,6 +42,6 @@ class Glm52Profile final : public ModelProtocolProfile {
   RawDecodingRequirements raw_decoding_;
 };
 
-std::shared_ptr<const ModelProtocolProfile> make_glm_5_2_profile();
+std::shared_ptr<const ModelProtocolProfile> make_glm_moe_dsa_profile();
 
 }  // namespace xllm::model_protocol

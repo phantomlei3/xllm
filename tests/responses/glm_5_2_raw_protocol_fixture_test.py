@@ -37,7 +37,7 @@ class Glm52RawProtocolFixtureTest(unittest.TestCase):
 
     def test_fixture_identity_and_coverage(self):
         self.assertEqual(self.fixture["schema_version"], 1)
-        self.assertEqual(self.fixture["profile"], "glm_5_2_responses")
+        self.assertEqual(self.fixture["profile"], "glm_moe_dsa_responses")
         self.assertEqual(
             {case["scenario_id"] for case in self.fixture["scenarios"]},
             REQUIRED_SCENARIOS,

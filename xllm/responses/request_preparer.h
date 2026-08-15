@@ -55,6 +55,7 @@ class PrepareResult final {
 
 PrepareResult prepare_request(
     const std::string& body,
+    const std::string& model_id,
     const model_protocol::ModelProtocolIdentity& profile,
     const RequestContext& context,
     const ResponsesLimits& limits = ResponsesLimits());

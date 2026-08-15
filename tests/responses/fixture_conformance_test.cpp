@@ -82,9 +82,9 @@ TEST(ResponsesFixtureCatalog, DiscoversEveryRequiredModelScenarioOnce) {
       "reasoning_truncated",
   };
 
-  EXPECT_EQ(
-      catalog.profiles(),
-      std::set<std::string>({"deepseek_v4_responses", "glm_5_2_responses"}));
+  EXPECT_EQ(catalog.profiles(),
+            std::set<std::string>(
+                {"deepseek_v4_responses", "glm_moe_dsa_responses"}));
   for (const std::string& profile : catalog.profiles()) {
     EXPECT_EQ(catalog.scenario_ids(profile), required);
   }

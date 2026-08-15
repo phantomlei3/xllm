@@ -141,7 +141,7 @@
       {"name":"unsupported_content_type","state":"supported","semantics":"Non-text content part.","error_behavior":"HTTP 400 before execution.","evidence":"rejected fixtures"},
       {"name":"unsupported_model_capability","state":"supported","semantics":"No complete registered Responses profile.","error_behavior":"HTTP 400 before execution.","evidence":"spec D46"},
       {"name":"model_not_found","state":"supported","semantics":"Requested model is not loaded.","error_behavior":"HTTP 4xx before execution.","evidence":"spec 10"},
-      {"name":"model_mismatch","state":"supported","semantics":"Alias does not match loaded canonical model.","error_behavior":"HTTP 4xx before execution.","evidence":"spec 10"},
+      {"name":"model_mismatch","state":"supported","semantics":"Requested model does not match the deployment binding.","error_behavior":"HTTP 4xx before execution.","evidence":"spec 10"},
       {"name":"unknown_tool","state":"supported","semantics":"Unknown definition or choice.","error_behavior":"HTTP 400 before execution.","evidence":"rejected fixtures"},
       {"name":"unknown_call_id","state":"supported","semantics":"Output references no prior call.","error_behavior":"HTTP 400 before execution.","evidence":"spec D26"},
       {"name":"duplicate_call_id","state":"supported","semantics":"call_id is not history-unique.","error_behavior":"HTTP 400 before execution.","evidence":"spec D26"},

@@ -36,7 +36,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/request/request_params.h"
 #include "core/model_protocol/deepseek_v4_profile.h"
-#include "core/model_protocol/glm_5_2_profile.h"
+#include "core/model_protocol/glm_moe_dsa_profile.h"
 #include "core/util/threadpool.h"
 #include "responses/json_encoder.h"
 #include "responses/output_processor.h"
@@ -77,7 +77,7 @@ struct RequestLogContext {
 RequestLogContext request_log_context(
     const responses::PreparedRequest& request) {
   return {.ids = request.context,
-          .model = request.canonical_model_id,
+          .model = request.model_id,
           .profile = request.profile_id};
 }
 
@@ -221,7 +221,7 @@ class StreamSession final : public ResponsesStreamControl,
       size_t body_bytes)
       : request_(request),
         parser_(profile->new_parser()),
-        processor_({.model = request.canonical_model_id,
+        processor_({.model = request.model_id,
                     .created_at =
                         std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::system_clock::now().time_since_epoch())
@@ -606,7 +606,7 @@ class NonStreamSession final {
       size_t body_bytes)
       : log_context_(request_log_context(request)),
         parser_(profile->new_parser()),
-        processor_({.model = request.canonical_model_id,
+        processor_({.model = request.model_id,
                     .created_at =
                         std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::system_clock::now().time_since_epoch())
@@ -722,27 +722,18 @@ model_protocol::LoadedModelContext inspect_responses_model(
   const bool cpp_template =
       ModelConfig::get_instance().use_cpp_chat_template() &&
       master.model_type() == "deepseek_v4";
-  std::string template_id;
   std::filesystem::path template_path;
   if (cpp_template) {
-    template_id =
-        "xllm/core/framework/chat_template/deepseek_v4_cpp_template.cpp";
     template_path =
         std::filesystem::path(__FILE__).parent_path().parent_path() /
         "core/framework/chat_template/"
         "deepseek_v4_cpp_template.cpp";
   } else {
     template_path = model_path / "chat_template.jinja";
-    template_id = template_path.string();
   }
   return {.model_id = model_id,
           .model_type = master.model_type(),
-          .model_fingerprint = sha256_file(model_path / "config.json"),
-          .tokenizer_id = model_path.string(),
           .tokenizer_fingerprint = sha256_file(model_path / "tokenizer.json"),
-          .tokenizer_config_fingerprint =
-              sha256_file(model_path / "tokenizer_config.json"),
-          .template_id = std::move(template_id),
           .template_fingerprint = sha256_file(template_path)};
 }
 
@@ -787,7 +778,7 @@ ResponsesServiceImpl::ResponsesServiceImpl(
   model_protocol::ModelProtocolError error =
       registry_.add(model_protocol::make_deepseek_v4_profile());
   if (error.ok()) {
-    error = registry_.add(model_protocol::make_glm_5_2_profile());
+    error = registry_.add(model_protocol::make_glm_moe_dsa_profile());
   }
   if (!error.ok()) {
     deployment_error_ = error.message();
@@ -809,13 +800,10 @@ bool ResponsesServiceImpl::add_model(
     }
     return false;
   }
-  Backend backend{.profile = result.profile(), .executor = executor};
-  const model_protocol::ModelProtocolIdentity& identity =
-      result.profile()->identity();
-  backends_.insert_or_assign(identity.canonical_model_id, backend);
-  for (const std::string& alias : identity.model_aliases) {
-    backends_.insert_or_assign(alias, backend);
-  }
+  ModelDeploymentBinding deployment{.model_id = context.model_id,
+                                    .profile = result.profile(),
+                                    .executor = executor};
+  deployments_.insert_or_assign(context.model_id, std::move(deployment));
   return true;
 }
 
@@ -855,8 +843,8 @@ void ResponsesServiceImpl::process_non_stream(const std::string& body,
     completion(error_result(/*status_code=*/400, model.error()));
     return;
   }
-  auto backend = backends_.find(model.model());
-  if (backend == backends_.end()) {
+  auto deployment = deployments_.find(model.model());
+  if (deployment == deployments_.end()) {
     completion(error_result(
         /*status_code=*/400,
         {.message = "model has no Responses protocol profile",
@@ -864,13 +852,17 @@ void ResponsesServiceImpl::process_non_stream(const std::string& body,
          .code = ErrorCode::UNSUPPORTED_MODEL_CAPABILITY}));
     return;
   }
-  responses::PrepareResult prepared = responses::prepare_request(
-      body, backend->second.profile->identity(), context, limits_);
+  responses::PrepareResult prepared =
+      responses::prepare_request(body,
+                                 deployment->second.model_id,
+                                 deployment->second.profile->identity(),
+                                 context,
+                                 limits_);
   if (!prepared.ok()) {
     const model_protocol::ModelProtocolIdentity& identity =
-        backend->second.profile->identity();
+        deployment->second.profile->identity();
     log_rejection(context,
-                  identity.canonical_model_id,
+                  deployment->second.model_id,
                   identity.profile_id,
                   body.size(),
                   prepared.error().code);
@@ -886,11 +878,11 @@ void ResponsesServiceImpl::process_non_stream(const std::string& body,
     return;
   }
   auto session = std::make_shared<NonStreamSession>(prepared.value(),
-                                                    backend->second.profile,
+                                                    deployment->second.profile,
                                                     std::move(completion),
                                                     limits_,
                                                     body.size());
-  backend->second.executor->execute(
+  deployment->second.executor->execute(
       prepared.value(), [session](RequestOutput output) {
         return session->consume(std::move(output));
       });
@@ -923,8 +915,8 @@ std::shared_ptr<ResponsesStreamControl> ResponsesServiceImpl::process_stream(
     early_completion(error_result(/*status_code=*/400, model.error()));
     return nullptr;
   }
-  auto backend = backends_.find(model.model());
-  if (backend == backends_.end()) {
+  auto deployment = deployments_.find(model.model());
+  if (deployment == deployments_.end()) {
     early_completion(error_result(
         /*status_code=*/400,
         {.message = "model has no Responses protocol profile",
@@ -932,13 +924,17 @@ std::shared_ptr<ResponsesStreamControl> ResponsesServiceImpl::process_stream(
          .code = ErrorCode::UNSUPPORTED_MODEL_CAPABILITY}));
     return nullptr;
   }
-  responses::PrepareResult prepared = responses::prepare_request(
-      body, backend->second.profile->identity(), context, limits_);
+  responses::PrepareResult prepared =
+      responses::prepare_request(body,
+                                 deployment->second.model_id,
+                                 deployment->second.profile->identity(),
+                                 context,
+                                 limits_);
   if (!prepared.ok()) {
     const model_protocol::ModelProtocolIdentity& identity =
-        backend->second.profile->identity();
+        deployment->second.profile->identity();
     log_rejection(context,
-                  identity.canonical_model_id,
+                  deployment->second.model_id,
                   identity.profile_id,
                   body.size(),
                   prepared.error().code);
@@ -961,8 +957,8 @@ std::shared_ptr<ResponsesStreamControl> ResponsesServiceImpl::process_stream(
     return nullptr;
   }
   auto session = std::make_shared<StreamSession>(prepared.value(),
-                                                 backend->second.profile,
-                                                 backend->second.executor,
+                                                 deployment->second.profile,
+                                                 deployment->second.executor,
                                                  std::move(writer),
                                                  executor_factory_(),
                                                  limits_,

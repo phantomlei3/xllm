@@ -257,9 +257,13 @@ std::optional<ResponsesError> read_parts(const Json& content,
 class RequestAssembler final {
  public:
   RequestAssembler(const model_protocol::ModelProtocolIdentity& profile,
+                   const std::string& model_id,
                    const RequestContext& context,
                    const ResponsesLimits& limits)
-      : profile_(profile), context_(context), limits_(limits) {}
+      : profile_(profile),
+        model_id_(model_id),
+        context_(context),
+        limits_(limits) {}
 
   PrepareResult assemble(const Json& body) {
     if (std::optional<ResponsesError> error =
@@ -290,8 +294,10 @@ class RequestAssembler final {
     }
     const std::string model = body["model"].get<std::string>();
     if (!model_matches(model)) {
-      return PrepareResult(make_error(
-          ErrorCode::MODEL_MISMATCH, "model", "model does not match profile"));
+      return PrepareResult(
+          make_error(ErrorCode::MODEL_MISMATCH,
+                     "model",
+                     "model does not match deployment binding"));
     }
     if (!body.contains("input") && !body.contains("instructions")) {
       return PrepareResult(
@@ -300,7 +306,7 @@ class RequestAssembler final {
 
     PreparedRequest prepared;
     prepared.profile_id = profile_.profile_id;
-    prepared.canonical_model_id = profile_.canonical_model_id;
+    prepared.model_id = model_id_;
     prepared.context = context_;
     init_chat(&prepared);
 
@@ -356,16 +362,11 @@ class RequestAssembler final {
   };
 
   bool model_matches(const std::string& model) const {
-    if (model == profile_.canonical_model_id) {
-      return true;
-    }
-    return std::find(profile_.model_aliases.begin(),
-                     profile_.model_aliases.end(),
-                     model) != profile_.model_aliases.end();
+    return model == model_id_;
   }
 
   void init_chat(PreparedRequest* prepared) const {
-    prepared->chat_request.set_model(profile_.canonical_model_id);
+    prepared->chat_request.set_model(model_id_);
     prepared->chat_request.set_n(1);
     prepared->chat_request.set_thinking_history_policy(proto::PRESERVE);
     prepared->chat_request.set_output_decoding_policy(proto::PROTOCOL_RAW);
@@ -1257,6 +1258,7 @@ class RequestAssembler final {
   }
 
   const model_protocol::ModelProtocolIdentity& profile_;
+  const std::string& model_id_;
   const RequestContext& context_;
   const ResponsesLimits& limits_;
   std::unordered_set<std::string> item_ids_;
@@ -1302,6 +1304,7 @@ PrepareResult::PrepareResult(ResponsesError error) : error_(std::move(error)) {}
 
 PrepareResult prepare_request(
     const std::string& body,
+    const std::string& model_id,
     const model_protocol::ModelProtocolIdentity& profile,
     const RequestContext& context,
     const ResponsesLimits& limits) {
@@ -1325,7 +1328,7 @@ PrepareResult prepare_request(
   if (!parsed.is_object()) {
     return PrepareResult(invalid("", "request body must be an object"));
   }
-  return RequestAssembler(profile, context, limits).assemble(parsed);
+  return RequestAssembler(profile, model_id, context, limits).assemble(parsed);
 }
 
 }  // namespace xllm::responses

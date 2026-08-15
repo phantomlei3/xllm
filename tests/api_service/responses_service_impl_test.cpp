@@ -28,7 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/model_protocol/deepseek_v4_profile.h"
-#include "core/model_protocol/glm_5_2_profile.h"
+#include "core/model_protocol/glm_moe_dsa_profile.h"
 
 namespace xllm {
 namespace {
@@ -38,11 +38,7 @@ model_protocol::LoadedModelContext context_for(
     const std::string& model_id) {
   return {.model_id = model_id,
           .model_type = identity.model_type,
-          .model_fingerprint = identity.model_fingerprint,
-          .tokenizer_id = identity.tokenizer_id,
           .tokenizer_fingerprint = identity.tokenizer_fingerprint,
-          .tokenizer_config_fingerprint = identity.tokenizer_config_fingerprint,
-          .template_id = identity.template_id,
           .template_fingerprint = identity.template_fingerprint};
 }
 
@@ -285,6 +281,68 @@ TEST(ResponsesServiceImplTest, CompletesThroughSharedPipeline) {
   EXPECT_EQ(executor.request().chat_request.output_decoding_policy(),
             proto::PROTOCOL_RAW);
   EXPECT_EQ(executor.request().sequence_count, 1);
+}
+
+TEST(ResponsesServiceImplTest, BindsAndEchoesDeploymentModelId) {
+  const auto profile = model_protocol::make_deepseek_v4_profile();
+  FakeResponsesExecutor executor({text_output("hello")});
+  ResponsesServiceImpl service(responses::ResponsesLimits(),
+                               inline_executor_factory());
+  ASSERT_TRUE(service.add_model(
+      context_for(profile->identity(), "deepseek-v4-flash-w8a8"), &executor));
+
+  ResponsesHttpResult result;
+  service.process_non_stream(
+      R"({"model":"deepseek-v4-flash-w8a8","input":"hi"})",
+      "application/json",
+      {.request_id = "request-deployment", .trace_id = "trace-deployment"},
+      [&result](ResponsesHttpResult value) { result = std::move(value); });
+
+  ASSERT_EQ(result.status_code, 200) << result.body.dump();
+  EXPECT_EQ(result.body["model"], "deepseek-v4-flash-w8a8");
+  EXPECT_EQ(executor.request().chat_request.model(), "deepseek-v4-flash-w8a8");
+
+  auto writer = std::make_shared<FakeStreamWriter>();
+  ASSERT_NE(
+      service.process_stream(
+          R"({"model":"deepseek-v4-flash-w8a8","input":"hi","stream":true})",
+          "application/json",
+          {},
+          writer,
+          [](ResponsesHttpResult /*unused*/) {}),
+      nullptr);
+  EXPECT_EQ(terminal_response(*writer)["model"], "deepseek-v4-flash-w8a8");
+
+  ResponsesHttpResult historical_name;
+  service.process_non_stream(R"({"model":"deepseek-v4","input":"hi"})",
+                             "application/json",
+                             {},
+                             [&historical_name](ResponsesHttpResult value) {
+                               historical_name = std::move(value);
+                             });
+  EXPECT_EQ(historical_name.status_code, 400);
+  EXPECT_EQ(historical_name.body["error"]["code"],
+            "unsupported_model_capability");
+}
+
+TEST(ResponsesServiceImplTest, BindsGlmMoeDsaDeploymentModelId) {
+  const auto profile = model_protocol::make_glm_moe_dsa_profile();
+  FakeResponsesExecutor executor({text_output("hello")});
+  ResponsesServiceImpl service(responses::ResponsesLimits(),
+                               inline_executor_factory());
+  ASSERT_TRUE(service.add_model(
+      context_for(profile->identity(), "glm-5.2-flash-w4a8"), &executor));
+
+  ResponsesHttpResult result;
+  service.process_non_stream(
+      R"({"model":"glm-5.2-flash-w4a8","input":"hi"})",
+      "application/json",
+      {},
+      [&result](ResponsesHttpResult value) { result = std::move(value); });
+
+  ASSERT_EQ(result.status_code, 200) << result.body.dump();
+  EXPECT_EQ(result.body["model"], "glm-5.2-flash-w4a8");
+  EXPECT_EQ(executor.request().profile_id, "glm_moe_dsa_responses");
 }
 
 TEST(ResponsesServiceImplTest, SuccessLogsOnlySafeResponseMetadata) {
@@ -648,7 +706,7 @@ TEST(ResponsesServiceImplTest, FixtureStreamsReaggregateLikeNonStream) {
     std::shared_ptr<const model_protocol::ModelProtocolProfile> profile =
         scenario.profile == "deepseek-v4"
             ? model_protocol::make_deepseek_v4_profile()
-            : model_protocol::make_glm_5_2_profile();
+            : model_protocol::make_glm_moe_dsa_profile();
     const RequestOutput output =
         fixture_output(scenario.profile, scenario.scenario);
     FakeResponsesExecutor non_stream_executor({output});
@@ -696,7 +754,7 @@ TEST(ResponsesServiceImplTest, FixtureStreamsReaggregateLikeNonStream) {
 }
 
 TEST(ResponsesServiceImplTest, RejectsBeforeExecutionWithStableEnvelope) {
-  const auto profile = model_protocol::make_glm_5_2_profile();
+  const auto profile = model_protocol::make_glm_moe_dsa_profile();
   FakeResponsesExecutor executor({text_output("unused")});
   responses::ResponsesLimits limits;
   limits.max_body_bytes = 8;
@@ -871,7 +929,7 @@ TEST(ResponsesServiceImplTest, FailsClosedOnMultipleSequences) {
 }
 
 TEST(ResponsesServiceImplTest, SupportsBothProfilesAndTypedTools) {
-  const auto glm = model_protocol::make_glm_5_2_profile();
+  const auto glm = model_protocol::make_glm_moe_dsa_profile();
   FakeResponsesExecutor glm_executor(
       {fixture_output("glm-5.2", "reasoning_text_stop")});
   ResponsesServiceImpl glm_service;

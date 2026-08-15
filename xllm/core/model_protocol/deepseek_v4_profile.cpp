@@ -42,26 +42,11 @@ ReasoningEffort map_effort(ReasoningEffort effort) {
 
 DeepseekV4Profile::DeepseekV4Profile()
     : identity_{.profile_id = "deepseek_v4_responses",
-                .canonical_model_id = "deepseek-v4",
-                .model_aliases =
-                    {"/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa"},
                 .model_type = "deepseek_v4",
-                .model_fingerprint =
-                    "sha256:"
-                    "333f773ad8f613d632293ad4da456df7620074f905705c0e5270b42b40"
-                    "31c9a4",
-                .tokenizer_id = "/ds_models/DeepSeek-V4-Flash-0731-W8A8-no-woa",
                 .tokenizer_fingerprint =
                     "sha256:"
                     "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c"
                     "8633cf",
-                .tokenizer_config_fingerprint =
-                    "sha256:"
-                    "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f5"
-                    "0d8547",
-                .template_id =
-                    "xllm/core/framework/chat_template/"
-                    "deepseek_v4_cpp_template.cpp",
                 .template_fingerprint =
                     "sha256:"
                     "a06d98abfe8e4d78d2505ca28464e6b4af203731d6c07ee1ca9c4ab1"
