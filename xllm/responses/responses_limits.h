@@ -22,6 +22,7 @@ namespace xllm::responses {
 struct ResponsesLimits {
   uint64_t max_body_bytes = 16 * 1024 * 1024;
   uint32_t max_json_depth = 64;
+  uint64_t max_client_metadata_bytes = 1024 * 1024;
   uint32_t max_input_items = 4096;
   uint64_t max_text_bytes = 4 * 1024 * 1024;
   uint32_t max_tools = 128;

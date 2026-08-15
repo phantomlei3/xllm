@@ -13,6 +13,7 @@
     "function_tool_output",
     "custom_tool_output",
     "reasoning_replay",
+    "subagent",
     "non_stream",
     "stream"
   ],
@@ -29,7 +30,7 @@
     {"path": "requests/codex-tool-loop-start.json", "kind": "captured_request", "source": "sanitized Codex capture request-1 preserving observed fields and tool definitions"},
     {"path": "requests/plain-text-nonstream.json", "kind": "request", "source": "normative xLLM profile derived from captured plain-text shape"},
     {"path": "requests/function-tool-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
-    {"path": "requests/apply-patch-stream.json", "kind": "request", "source": "sanitized Codex capture request-1"},
+    {"path": "requests/apply-patch-stream.json", "kind": "request", "source": "sanitized Codex capture with the rust-v0.147.0 parent and subagent metadata projections restored"},
     {"path": "requests/function-tool-output.json", "kind": "request", "source": "sanitized Codex capture request-2"},
     {"path": "requests/tool-loop-replay.json", "kind": "request", "source": "sanitized Codex capture request-3"},
     {"path": "expected-responses/plain-text.json", "kind": "expected_response", "source": "normative frozen profile"},

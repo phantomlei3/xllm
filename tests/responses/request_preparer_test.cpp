@@ -115,8 +115,6 @@ TEST(RequestPreparerTest, AcceptsOnlyCapturedNoEffectShapes) {
        "include"},
       {R"({"model":"fixture-model","input":"x","prompt_cache_key":""})",
        "prompt_cache_key"},
-      {R"({"model":"fixture-model","input":"x","client_metadata":{"other":"value"}})",
-       "client_metadata.other"},
       {R"({"model":"fixture-model","input":"x","text":{"verbosity":"high"}})",
        "text.verbosity"},
       {R"({"model":"fixture-model","input":"x","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"other"}}]})",
@@ -126,6 +124,47 @@ TEST(RequestPreparerTest, AcceptsOnlyCapturedNoEffectShapes) {
   for (const auto& [body, param] : rejected) {
     expect_error(body, ErrorCode::UNSUPPORTED_PARAMETER, param);
   }
+}
+
+TEST(RequestPreparerTest, AcceptsBoundedOpaqueClientMetadata) {
+  const std::vector<std::string> accepted = {
+      R"({"model":"fixture-model","input":"x"})",
+      R"({"model":"fixture-model","input":"x","client_metadata":{}})",
+      R"({"model":"fixture-model","input":"x","client_metadata":{"future":{"nested":[1,true,null]},"session_id":"SESSION_SECRET"}})",
+  };
+
+  for (const std::string& body : accepted) {
+    PrepareResult result = prepare(body);
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(
+        result.value().chat_request.SerializeAsString().find("SESSION_SECRET"),
+        std::string::npos);
+  }
+}
+
+TEST(RequestPreparerTest, ValidatesClientMetadataShapeAndSize) {
+  for (const std::string& value : {"null", "[]", R"("value")", "1", "true"}) {
+    expect_error(
+        "{\"model\":\"fixture-model\",\"input\":\"x\","
+        "\"client_metadata\":" +
+            value + "}",
+        ErrorCode::INVALID_REQUEST,
+        "client_metadata");
+  }
+
+  nlohmann::json body = {
+      {"model", "fixture-model"},
+      {"input", "x"},
+      {"client_metadata", {{"future", "metadata"}}},
+  };
+  ResponsesLimits exact;
+  exact.max_client_metadata_bytes = body["client_metadata"].dump().size();
+  EXPECT_TRUE(prepare(body.dump(), exact).ok());
+
+  ResponsesLimits too_small = exact;
+  --too_small.max_client_metadata_bytes;
+  expect_error(
+      body.dump(), ErrorCode::REQUEST_TOO_LARGE, "client_metadata", too_small);
 }
 
 TEST(RequestPreparerTest, KeepsInstructionsAndDeveloperAsSystemMessages) {

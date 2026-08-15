@@ -356,7 +356,7 @@ TEST(ResponsesServiceImplTest, SuccessLogsOnlySafeResponseMetadata) {
   ResponsesHttpResult result;
 
   service.process_non_stream(
-      R"({"model":"deepseek-v4","input":[{"type":"message","role":"user","content":"PROMPT_SECRET"},{"type":"reasoning","id":"rs_safe","content":"REASONING_SECRET"},{"type":"function_call","id":"fc_safe","call_id":"call_safe","name":"read_fixture","arguments":"{\"secret\":\"ARGUMENT_SECRET\"}"},{"type":"function_call_output","call_id":"call_safe","output":"TOOL_OUTPUT_SECRET"},{"type":"custom_tool_call","id":"ctc_safe","call_id":"call_patch","name":"apply_patch","input":"PATCH_SECRET"},{"type":"custom_tool_call_output","call_id":"call_patch","output":"PATCH_OUTPUT_SECRET"}],"tools":[{"type":"function","name":"read_fixture","parameters":{}},{"type":"custom","name":"apply_patch"}]})",
+      R"({"model":"deepseek-v4","input":[{"type":"message","role":"user","content":"PROMPT_SECRET"},{"type":"reasoning","id":"rs_safe","content":"REASONING_SECRET"},{"type":"function_call","id":"fc_safe","call_id":"call_safe","name":"read_fixture","arguments":"{\"secret\":\"ARGUMENT_SECRET\"}"},{"type":"function_call_output","call_id":"call_safe","output":"TOOL_OUTPUT_SECRET"},{"type":"custom_tool_call","id":"ctc_safe","call_id":"call_patch","name":"apply_patch","input":"PATCH_SECRET"},{"type":"custom_tool_call_output","call_id":"call_patch","output":"PATCH_OUTPUT_SECRET"}],"tools":[{"type":"function","name":"read_fixture","parameters":{}},{"type":"custom","name":"apply_patch"}],"client_metadata":{"session_id":"METADATA_SECRET","future":{"nested":true}}})",
       "application/json",
       {.request_id = "request-safe", .trace_id = "trace-safe"},
       [&result](ResponsesHttpResult value) { result = std::move(value); });
@@ -375,9 +375,13 @@ TEST(ResponsesServiceImplTest, SuccessLogsOnlySafeResponseMetadata) {
                                     "TOOL_OUTPUT_SECRET",
                                     "PATCH_SECRET",
                                     "PATCH_OUTPUT_SECRET",
+                                    "METADATA_SECRET",
                                     "GENERATED_SECRET"}) {
     EXPECT_EQ(captured.find(secret), std::string::npos) << secret;
   }
+  EXPECT_EQ(executor.request().chat_request.SerializeAsString().find(
+                "METADATA_SECRET"),
+            std::string::npos);
 }
 
 TEST(ResponsesServiceImplTest, ErrorLogsOnlySafeRequestMetadata) {
@@ -418,7 +422,7 @@ TEST(ResponsesServiceImplTest, StreamsFormalTerminalAndClosesExactlyOnce) {
   ResponsesHttpResult early_error;
 
   std::shared_ptr<ResponsesStreamControl> stream = service.process_stream(
-      R"({"model":"deepseek-v4","input":"hi","stream":true})",
+      R"({"model":"deepseek-v4","input":"hi","stream":true,"client_metadata":{"session_id":"stream-session","future_key":"value"}})",
       "application/json",
       {.request_id = "request-stream", .trace_id = "trace-stream"},
       writer,
@@ -784,6 +788,23 @@ TEST(ResponsesServiceImplTest, RejectsBeforeExecutionWithStableEnvelope) {
       });
   EXPECT_EQ(invalid_json.status_code, 400);
   EXPECT_EQ(invalid_json.body["error"]["code"], "invalid_json");
+
+  responses::ResponsesLimits metadata_limits;
+  metadata_limits.max_client_metadata_bytes = 2;
+  ResponsesServiceImpl metadata_service(metadata_limits);
+  ASSERT_TRUE(metadata_service.add_model(
+      context_for(profile->identity(), "GLM-5-W4A8"), &executor));
+  ResponsesHttpResult oversized_metadata;
+  metadata_service.process_non_stream(
+      R"({"model":"GLM-5-W4A8","input":"x","client_metadata":{"id":"value"}})",
+      "application/json",
+      {},
+      [&oversized_metadata](ResponsesHttpResult value) {
+        oversized_metadata = std::move(value);
+      });
+  EXPECT_EQ(oversized_metadata.status_code, 400);
+  EXPECT_EQ(oversized_metadata.body["error"]["code"], "request_too_large");
+  EXPECT_EQ(oversized_metadata.body["error"]["param"], "client_metadata");
 }
 
 TEST(ResponsesServiceImplTest, UnknownModelDoesNotAffectRegisteredModel) {

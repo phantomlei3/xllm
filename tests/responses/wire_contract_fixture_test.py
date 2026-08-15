@@ -75,6 +75,7 @@ class WireContractFixtureTest(unittest.TestCase):
                 "function_tool_output",
                 "custom_tool_output",
                 "reasoning_replay",
+                "subagent",
                 "non_stream",
                 "stream",
             },
@@ -126,10 +127,25 @@ class WireContractFixtureTest(unittest.TestCase):
         self.assertEqual(request["include"], ["reasoning.encrypted_content"])
         self.assertEqual(request["prompt_cache_key"], "fixture-session")
         self.assertEqual(request["text"], {"verbosity": "low"})
+        client_metadata = request["client_metadata"]
+        self.assertEqual(client_metadata["session_id"], "session_fixture")
+        self.assertEqual(client_metadata["thread_id"], "thread_fixture")
+        self.assertEqual(client_metadata["turn_id"], "turn_fixture")
         self.assertEqual(
-            request["client_metadata"],
-            {"x-codex-turn-metadata": "<redacted>"},
+            client_metadata["x-codex-installation-id"],
+            "installation_fixture",
         )
+        self.assertEqual(client_metadata["x-codex-window-id"], "thread_fixture:1")
+        turn_metadata = json.loads(client_metadata["x-codex-turn-metadata"])
+        self.assertEqual(turn_metadata["request_kind"], "turn")
+        self.assertEqual(turn_metadata["session_id"], "session_fixture")
+
+        subagent = self.load_json("requests/apply-patch-stream.json")["client_metadata"]
+        self.assertEqual(subagent["x-codex-parent-thread-id"], "thread_fixture")
+        self.assertEqual(subagent["parent_turn_id"], "turn_fixture")
+        self.assertEqual(subagent["x-openai-subagent"], "thread_spawn")
+        subagent_turn = json.loads(subagent["x-codex-turn-metadata"])
+        self.assertEqual(subagent_turn["subagent_kind"], "thread_spawn")
 
     def test_matrix_covers_known_codex_and_schema_branches(self):
         matrix = self.load_json("compatibility-matrix.json")

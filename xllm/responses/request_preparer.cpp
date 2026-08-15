@@ -398,24 +398,8 @@ class RequestAssembler final {
       }
     }
     if (body.contains("client_metadata")) {
-      const Json& metadata = body["client_metadata"];
-      if (!metadata.is_object()) {
-        return invalid("client_metadata", "client metadata must be an object");
-      }
-      if (std::optional<ResponsesError> error = reject_unknown(
-              metadata, {"x-codex-turn-metadata"}, "client_metadata")) {
-        return error;
-      }
-      if (!metadata.contains("x-codex-turn-metadata")) {
-        return invalid("client_metadata.x-codex-turn-metadata",
-                       "Codex turn metadata is required");
-      }
-      std::string value;
       if (std::optional<ResponsesError> error =
-              read_text(metadata["x-codex-turn-metadata"],
-                        "client_metadata.x-codex-turn-metadata",
-                        limits_,
-                        &value)) {
+              parse_client_metadata(body["client_metadata"])) {
         return error;
       }
     }
@@ -433,6 +417,19 @@ class RequestAssembler final {
         return unsupported("text.verbosity",
                            "only captured low verbosity is accepted");
       }
+    }
+    return std::nullopt;
+  }
+
+  std::optional<ResponsesError> parse_client_metadata(
+      const Json& metadata) const {
+    if (!metadata.is_object()) {
+      return invalid("client_metadata", "client metadata must be an object");
+    }
+    if (metadata.dump().size() > limits_.max_client_metadata_bytes) {
+      return make_error(ErrorCode::REQUEST_TOO_LARGE,
+                        "client_metadata",
+                        "client metadata exceeds configured limit");
     }
     return std::nullopt;
   }

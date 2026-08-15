@@ -8,7 +8,17 @@
   "include": ["reasoning.encrypted_content"],
   "text": {"verbosity": "low"},
   "prompt_cache_key": "fixture-session",
-  "client_metadata": {"x-codex-turn-metadata": "<redacted>"},
+  "client_metadata": {
+    "x-codex-installation-id": "installation_fixture",
+    "session_id": "session_fixture",
+    "thread_id": "subagent_thread_fixture",
+    "turn_id": "subagent_turn_fixture",
+    "x-codex-window-id": "subagent_thread_fixture:1",
+    "x-codex-parent-thread-id": "thread_fixture",
+    "parent_turn_id": "turn_fixture",
+    "x-openai-subagent": "thread_spawn",
+    "x-codex-turn-metadata": "{\"request_kind\":\"turn\",\"session_id\":\"session_fixture\",\"thread_id\":\"subagent_thread_fixture\",\"turn_id\":\"subagent_turn_fixture\",\"parent_thread_id\":\"thread_fixture\",\"parent_turn_id\":\"turn_fixture\",\"subagent_kind\":\"thread_spawn\"}"
+  },
   "tools": [{
     "type": "custom",
     "name": "apply_patch",

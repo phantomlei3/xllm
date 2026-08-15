@@ -47,5 +47,12 @@
   "include": ["reasoning.encrypted_content"],
   "text": {"verbosity": "low"},
   "prompt_cache_key": "fixture-session",
-  "client_metadata": {"x-codex-turn-metadata": "<redacted>"}
+  "client_metadata": {
+    "x-codex-installation-id": "installation_fixture",
+    "session_id": "session_fixture",
+    "thread_id": "thread_fixture",
+    "turn_id": "turn_fixture",
+    "x-codex-window-id": "thread_fixture:1",
+    "x-codex-turn-metadata": "{\"request_kind\":\"turn\",\"session_id\":\"session_fixture\",\"thread_id\":\"thread_fixture\",\"turn_id\":\"turn_fixture\"}"
+  }
 }

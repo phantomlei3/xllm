@@ -21,8 +21,14 @@ The capture established three Codex-required no-effect fields that differ from
 the initial profile table: `reasoning.summary=auto`,
 `include=["reasoning.encrypted_content"]`, and `prompt_cache_key`. The local
 0.147.0 build also sent `client_metadata` and `text.verbosity` when its injected
-model catalog enabled those features. They are accepted only in the frozen
-forms recorded in the compatibility matrix; unknown values remain fail-closed.
+model catalog enabled those features. `client_metadata` is accepted as a
+bounded opaque object because its flat telemetry projections evolve with the
+client; other no-effect fields remain restricted to the frozen forms in the
+compatibility matrix. Unknown top-level request fields remain fail-closed.
+The xLLM limit is one MiB of compact UTF-8 JSON, including object delimiters,
+keys, values, and JSON escaping; values at the limit are accepted and larger
+objects are rejected with `request_too_large` at `client_metadata`. The raw
+request remains independently bounded by the Responses body limit.
 
 Sources:
 
