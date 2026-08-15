@@ -21,7 +21,9 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "chat.pb.h"
 #include "framework/request/incremental_decoder.h"
+#include "framework/request/request_params.h"
 #include "framework/request/sequence.h"
 
 namespace xllm {
@@ -33,9 +35,10 @@ class StopAwareTokenizer final : public Tokenizer {
                      bool skip_special_tokens) const override {
     std::string text;
     for (const int32_t token_id : ids) {
-      if (token_id == kStopTokenId) {
+      if (token_id == kStopTokenId || token_id == kDeepSeekEosTokenId) {
         if (!skip_special_tokens) {
-          text += "<|observation|>";
+          text += token_id == kDeepSeekEosTokenId ? "<｜end▁of▁sentence｜>"
+                                                  : "<|observation|>";
         }
         continue;
       }
@@ -45,6 +48,7 @@ class StopAwareTokenizer final : public Tokenizer {
   }
 
   static constexpr int32_t kStopTokenId = 1000;
+  static constexpr int32_t kDeepSeekEosTokenId = 1;
 };
 
 class SequenceStopOutputTest : public ::testing::Test {
@@ -212,6 +216,31 @@ TEST_F(SequenceStopOutputTest, EosOutputUsesIncludeStopStringSetting) {
   append_token(StopAwareTokenizer::kStopTokenId);
   ASSERT_TRUE(sequence_->finished());
   EXPECT_EQ(sequence_->generate_output(tokenizer_).text, "A<|observation|>");
+}
+
+TEST_F(SequenceStopOutputTest, RawPolicyKeepsDeepSeekEosTokenAndTextAligned) {
+  proto::ChatRequest request;
+  request.set_skip_special_tokens(true);
+  request.set_include_stop_str_in_output(false);
+  request.set_output_decoding_policy(proto::PROTOCOL_RAW);
+  RequestParams params(request, "", "");
+
+  initialize(/*max_generated_tokens=*/8,
+             /*stop_tokens=*/{},
+             /*stop_sequences=*/{},
+             /*prompt_tokens=*/{'P'},
+             /*include_stop_str_in_output=*/params.include_stop_str_in_output,
+             /*eos_token=*/StopAwareTokenizer::kDeepSeekEosTokenId,
+             /*skip_special_tokens=*/params.skip_special_tokens);
+  append_token('A');
+  append_token(StopAwareTokenizer::kDeepSeekEosTokenId);
+  ASSERT_TRUE(sequence_->finished());
+
+  SequenceOutput output = sequence_->generate_output(tokenizer_);
+
+  EXPECT_EQ(output.text, "A<｜end▁of▁sentence｜>");
+  ASSERT_EQ(output.token_ids.size(), 2);
+  EXPECT_EQ(output.token_ids[1], StopAwareTokenizer::kDeepSeekEosTokenId);
 }
 
 TEST_F(SequenceStopOutputTest, SkipSpecialTokensRemainsIndependent) {

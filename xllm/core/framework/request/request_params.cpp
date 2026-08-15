@@ -498,6 +498,7 @@ RequestParams::RequestParams(const proto::ChatRequest& request,
   if (output_decoding_policy ==
       model_protocol::OutputDecodingPolicy::PROTOCOL_RAW) {
     skip_special_tokens = false;
+    include_stop_str_in_output = true;
   }
   if (request.has_reasoning_effort()) {
     reasoning_effort = static_cast<model_protocol::ReasoningEffort>(
