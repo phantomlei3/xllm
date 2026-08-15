@@ -119,13 +119,11 @@ TemplatePolicy GlmMoeDsaProfile::resolve_template(
 std::unique_ptr<ModelOutputParser> GlmMoeDsaProfile::new_parser() const {
   TextReasoningGrammar grammar;
   grammar.reasoning_end = "</think>";
-  grammar.reasoning_end_token = 154842;
+  grammar.reasoning_end_tokens = {154842};
   grammar.text_end = "<|user|>";
-  grammar.text_end_token = 154827;
-  for (int64_t token_id : raw_decoding_.preserved_token_ids) {
-    grammar.reserved_control_tokens.emplace_back(
-        static_cast<int32_t>(token_id));
-  }
+  grammar.text_end_tokens = {154827};
+  grammar.tool_open_tokens = {154843};
+  grammar.tool_done_tokens = {154829};
   grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
   grammar.tool.dialect = ToolGrammarDialect::GLM_NATIVE;
   return make_text_reasoning_parser(std::move(grammar));

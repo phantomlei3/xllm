@@ -161,6 +161,76 @@ TEST(ResponsesProcessorTest, BuildsReasoningThenTextWithoutEmptyItems) {
   EXPECT_EQ(encoded["output"][1]["content"][0]["text"], "Answer");
 }
 
+TEST(ResponsesProcessorTest, CompletesCommentaryBeforeFunctionCalls) {
+  ResponsesProcessor processor(config(), std::make_unique<FixtureIdProvider>());
+  ASSERT_TRUE(processor.consume(
+      {.kind = OutputSegmentKind::TEXT_DELTA, .text = "I'll inspect it."}));
+  ASSERT_TRUE(processor.consume({.kind = OutputSegmentKind::TEXT_DONE}));
+  ASSERT_TRUE(processor.consume(
+      {.kind = OutputSegmentKind::FUNCTION_CALL_START, .name = "read_file"}));
+  ASSERT_TRUE(processor.consume({.kind = OutputSegmentKind::ARGUMENTS_DELTA,
+                                 .text = R"({"path":"a.cc"})"}));
+  ASSERT_TRUE(
+      processor.consume({.kind = OutputSegmentKind::FUNCTION_CALL_DONE}));
+
+  const FinalResponse& response = processor.response();
+  ASSERT_EQ(response.output.size(), 2);
+  EXPECT_EQ(std::get<OutputMessageItem>(response.output[0]).status,
+            ItemStatus::COMPLETED);
+  EXPECT_EQ(std::get<OutputFunctionCallItem>(response.output[1]).status,
+            ItemStatus::COMPLETED);
+}
+
+TEST(ResponsesProcessorTest, RawCommentaryAndCallShareJsonAndSseState) {
+  const std::string raw =
+      "</think>I'll inspect it.<tool_call>read_file<arg_key>path</arg_key>"
+      "<arg_value>a.cc</arg_value></tool_call><|observation|>";
+  const std::vector<int32_t> tokens = {154842, 42, 154843, 43, 154829};
+  model_protocol::GenerationDelta delta{
+      .sequence_index = 0,
+      .generation_ordinal = 0,
+      .text_delta = raw,
+      .token_id_delta = tokens,
+      .finished = true,
+      .finish_reason = "tool_calls",
+      .final_usage = usage(8, static_cast<int32_t>(tokens.size()), 0)};
+  std::unique_ptr<model_protocol::ModelOutputParser> parser =
+      model_protocol::make_glm_moe_dsa_profile()->new_parser();
+  ResponsesProcessor processor(config(), std::make_unique<FixtureIdProvider>());
+
+  ASSERT_TRUE(processor.consume(delta, *parser));
+  const nlohmann::json response = encode_response(processor.response());
+  ASSERT_EQ(response["output"].size(), 2);
+  EXPECT_EQ(response["output"][0]["type"], "message");
+  EXPECT_EQ(response["output"][1]["type"], "function_call");
+
+  const std::vector<ResponseEvent> events = processor.take_events();
+  ASSERT_FALSE(events.empty());
+  const nlohmann::json terminal = encode_event(events.back());
+  EXPECT_EQ(terminal["type"], "response.completed");
+  EXPECT_EQ(terminal["response"], response);
+}
+
+TEST(ResponsesProcessorTest, RejectsTextAfterCalls) {
+  for (const bool has_commentary : {false, true}) {
+    ResponsesProcessor processor(config(),
+                                 std::make_unique<FixtureIdProvider>());
+    if (has_commentary) {
+      ASSERT_TRUE(processor.consume(
+          {.kind = OutputSegmentKind::TEXT_DELTA, .text = "before"}));
+      ASSERT_TRUE(processor.consume({.kind = OutputSegmentKind::TEXT_DONE}));
+    }
+    ASSERT_TRUE(processor.consume(
+        {.kind = OutputSegmentKind::FUNCTION_CALL_START, .name = "read"}));
+    ASSERT_TRUE(processor.consume(
+        {.kind = OutputSegmentKind::ARGUMENTS_DELTA, .text = "{}"}));
+    ASSERT_TRUE(
+        processor.consume({.kind = OutputSegmentKind::FUNCTION_CALL_DONE}));
+    EXPECT_FALSE(processor.consume(
+        {.kind = OutputSegmentKind::TEXT_DELTA, .text = "after"}));
+  }
+}
+
 TEST(ResponsesProcessorTest, MatchesBothModelItemGoldens) {
   const testing::FixtureCatalog catalog =
       testing::FixtureCatalog::load(fixture_root());
@@ -368,7 +438,7 @@ TEST(ResponsesProcessorTerminalTest,
   EXPECT_EQ(std::get<OutputReasoningItem>(response.output[0]).status,
             ItemStatus::COMPLETED);
   EXPECT_EQ(std::get<OutputCustomToolCallItem>(response.output[1]).status,
-            ItemStatus::IN_PROGRESS);
+            ItemStatus::INCOMPLETE);
   const nlohmann::json encoded = encode_response(response);
   EXPECT_EQ(encoded["error"], nullptr);
   EXPECT_EQ(encoded["incomplete_details"]["reason"], "max_output_tokens");

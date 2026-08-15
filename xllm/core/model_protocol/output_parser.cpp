@@ -20,7 +20,6 @@ limitations under the License.
 #include <initializer_list>
 #include <nlohmann/json.hpp>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 
 namespace xllm::model_protocol {
@@ -47,6 +46,13 @@ enum class ParseState : uint8_t {
   TEXT = 1,
   TOOL = 2,
   DONE = 3,
+};
+
+enum class MarkerKind : uint8_t {
+  REASONING_END = 0,
+  TEXT_END = 1,
+  TOOL_OPEN = 2,
+  TOOL_DONE = 3,
 };
 
 bool utf8_prefix(const std::string& text, bool final, size_t* complete) {
@@ -103,6 +109,13 @@ bool whitespace_only(std::string_view text) {
   return std::all_of(text.begin(), text.end(), [](char value) {
     return std::isspace(static_cast<unsigned char>(value)) != 0;
   });
+}
+
+bool reserved_control_format(std::string_view text) {
+  return text.starts_with("<|") || text.starts_with("<｜") ||
+         text.starts_with("</｜") || text.starts_with("<tool_") ||
+         text.starts_with("</tool_") || text.starts_with("<arg_") ||
+         text.starts_with("</arg_");
 }
 
 std::string trim(std::string_view text) {
@@ -205,16 +218,14 @@ size_t boundary_close(std::string_view text,
 class TextReasoningParser final : public ModelOutputParser {
  public:
   explicit TextReasoningParser(TextReasoningGrammar grammar)
-      : grammar_(std::move(grammar)),
-        reserved_tokens_(grammar_.reserved_control_tokens.begin(),
-                         grammar_.reserved_control_tokens.end()) {}
+      : grammar_(std::move(grammar)) {}
 
   std::vector<OutputSegment> consume(const GenerationDelta& delta) override {
     std::vector<OutputSegment> output;
     if (failed_) {
       return output;
     }
-    if (done_) {
+    if (finalized_) {
       return fail(ParseFailureCode::DELTA_AFTER_FINISH,
                   "generation delta arrived after finish");
     }
@@ -236,7 +247,7 @@ class TextReasoningParser final : public ModelOutputParser {
     }
     utf8_pending_ += delta.text_delta;
     size_t complete_bytes = 0;
-    if (!utf8_prefix(utf8_pending_, delta.finished, &complete_bytes)) {
+    if (!utf8_prefix(utf8_pending_, /*final=*/false, &complete_bytes)) {
       return fail(ParseFailureCode::INVALID_UTF8,
                   "generation text is not valid UTF-8");
     }
@@ -247,15 +258,36 @@ class TextReasoningParser final : public ModelOutputParser {
 
     pending_ += utf8_pending_.substr(0, complete_bytes);
     utf8_pending_.erase(0, complete_bytes);
-    const bool incomplete = delta.finished && delta.finish_reason.has_value() &&
-                            *delta.finish_reason == "length";
-    parse_pending(&output, /*flush=*/delta.finished, incomplete);
+    parse_pending(&output, /*flush=*/false, /*incomplete=*/false);
     if (failed_) {
       output.emplace_back(failure_segment_);
+    }
+    return output;
+  }
+
+  std::vector<OutputSegment> finalize(ParserTerminalReason reason) override {
+    std::vector<OutputSegment> output;
+    if (failed_) {
       return output;
     }
-    if (delta.finished) {
+    if (finalized_) {
+      return fail(ParseFailureCode::DELTA_AFTER_FINISH,
+                  "parser terminal arrived more than once");
+    }
+    finalized_ = true;
+    size_t complete_bytes = 0;
+    const bool incomplete = reason == ParserTerminalReason::TOKEN_LIMIT;
+    if (!utf8_prefix(utf8_pending_, /*final=*/!incomplete, &complete_bytes)) {
+      return fail(ParseFailureCode::INVALID_UTF8,
+                  "generation text is not valid UTF-8");
+    }
+    pending_ += utf8_pending_.substr(0, complete_bytes);
+    utf8_pending_.erase(0, complete_bytes);
+    parse_pending(&output, /*flush=*/true, incomplete);
+    if (!failed_) {
       finish(&output, incomplete);
+    } else {
+      output.emplace_back(failure_segment_);
     }
     return output;
   }
@@ -281,20 +313,77 @@ class TextReasoningParser final : public ModelOutputParser {
         .failure = ParseFailure{.code = code, .message = message}};
   }
 
+  bool ends_with(const std::vector<int32_t>& suffix) const {
+    return suffix.size() <= token_tail_.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), token_tail_.rbegin());
+  }
+
+  void record_marker(MarkerKind kind, const std::vector<int32_t>& sequence) {
+    token_markers_.emplace_back(kind);
+    if (kind == MarkerKind::REASONING_END) {
+      reasoning_tokens_done_ = true;
+      reasoning_tokens_ -= static_cast<int32_t>(sequence.size());
+    }
+    token_tail_.clear();
+  }
+
+  void discard_marker() { token_tail_.clear(); }
+
   void inspect_tokens(const std::vector<int32_t>& tokens) {
+    const size_t max_sequence = std::max({grammar_.reasoning_end_tokens.size(),
+                                          grammar_.text_end_tokens.size(),
+                                          grammar_.tool_open_tokens.size(),
+                                          grammar_.tool_done_tokens.size(),
+                                          size_t{1}});
     for (int32_t token_id : tokens) {
       token_boundaries_ = true;
-      if (reserved_tokens_.contains(token_id)) {
-        if (token_id == grammar_.reasoning_end_token) {
-          ++reasoning_markers_;
-          reasoning_tokens_done_ = true;
-        } else if (token_id == grammar_.text_end_token) {
-          ++text_markers_;
-        }
-      } else if (!reasoning_tokens_done_) {
+      token_tail_.emplace_back(token_id);
+      if (!reasoning_tokens_done_) {
         ++reasoning_tokens_;
       }
+      if (!grammar_.tool_done_tokens.empty() &&
+          ends_with(grammar_.tool_done_tokens)) {
+        record_marker(MarkerKind::TOOL_DONE, grammar_.tool_done_tokens);
+        token_in_tool_ = false;
+      } else if (!grammar_.tool_open_tokens.empty() &&
+                 ends_with(grammar_.tool_open_tokens)) {
+        if (token_in_tool_) {
+          // Parallel GLM calls repeat tool-open without changing parser state.
+          discard_marker();
+        } else {
+          record_marker(MarkerKind::TOOL_OPEN, grammar_.tool_open_tokens);
+          token_in_tool_ = true;
+        }
+      } else if (!grammar_.reasoning_end_tokens.empty() &&
+                 ends_with(grammar_.reasoning_end_tokens)) {
+        record_marker(MarkerKind::REASONING_END, grammar_.reasoning_end_tokens);
+      } else if (!grammar_.text_end_tokens.empty() &&
+                 ends_with(grammar_.text_end_tokens)) {
+        record_marker(MarkerKind::TEXT_END, grammar_.text_end_tokens);
+      } else if (token_tail_.size() >= max_sequence) {
+        token_tail_.erase(token_tail_.begin());
+      }
     }
+  }
+
+  bool accept_marker(MarkerKind expected, bool allow_text_only) {
+    if (!token_boundaries_) {
+      return allow_text_only;
+    }
+    if (token_markers_.empty()) {
+      if (finalized_) {
+        set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
+                    "text marker has no matching token sequence");
+      }
+      return false;
+    }
+    if (token_markers_.front() != expected) {
+      set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
+                  "text and token control markers are out of order");
+      return false;
+    }
+    token_markers_.erase(token_markers_.begin());
+    return true;
   }
 
   void emit_payload(std::vector<OutputSegment>* output,
@@ -346,15 +435,11 @@ class TextReasoningParser final : public ModelOutputParser {
 
   bool consume_marker(size_t pos,
                       const std::string& marker,
-                      size_t* token_count,
+                      MarkerKind marker_kind,
+                      bool allow_text_only,
                       std::vector<OutputSegment>* output) {
-    if (token_boundaries_ && *token_count == 0) {
-      set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
-                  "text marker has no matching control token");
+    if (!accept_marker(marker_kind, allow_text_only)) {
       return false;
-    }
-    if (token_boundaries_) {
-      --*token_count;
     }
     emit_payload(output, pending_.substr(0, pos), /*incomplete=*/false);
     output->emplace_back(
@@ -651,23 +736,24 @@ class TextReasoningParser final : public ModelOutputParser {
     if (done_pos == std::string::npos) {
       return false;
     }
+    if (!accept_marker(MarkerKind::TOOL_DONE,
+                       finalized_ && !token_boundaries_)) {
+      return false;
+    }
     const std::string body = pending_.substr(0, done_pos);
+    // Validate the complete block before exposing any call lifecycle.
+    std::vector<OutputSegment> parsed_output;
     bool parsed = false;
     if (grammar_.tool.dialect == ToolGrammarDialect::DEEPSEEK_DSML) {
-      parsed = parse_dsml(body, output);
-      if (parsed && token_boundaries_ && !text_markers_) {
-        set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
-                    "tool terminal has no matching control token");
-        return false;
-      }
-      if (parsed && token_boundaries_) {
-        --text_markers_;
-      }
+      parsed = parse_dsml(body, &parsed_output);
     } else if (grammar_.tool.dialect == ToolGrammarDialect::GLM_NATIVE) {
-      parsed = parse_glm(body, output);
+      parsed = parse_glm(body, &parsed_output);
     }
     if (!parsed) {
       return false;
+    }
+    for (OutputSegment& segment : parsed_output) {
+      output->emplace_back(std::move(segment));
     }
     pending_.erase(0, done_pos + done_marker.size());
     state_ = ParseState::DONE;
@@ -684,6 +770,11 @@ class TextReasoningParser final : public ModelOutputParser {
                      bool incomplete) {
     while (!pending_.empty() && !failed_) {
       if (state_ == ParseState::TOOL) {
+        if (pending_.size() > grammar_.tool.max_tool_block_bytes) {
+          set_failure(ParseFailureCode::TOOL_BLOCK_TOO_LARGE,
+                      "tool block exceeds the profile limit");
+          return;
+        }
         parse_tools(output);
         return;
       }
@@ -702,12 +793,18 @@ class TextReasoningParser final : public ModelOutputParser {
         const size_t tool_pos = pending_.find(open);
         if (tool_pos != std::string::npos &&
             (marker_pos == std::string::npos || tool_pos < marker_pos)) {
-          if (text_started_ ||
-              !whitespace_only(
-                  std::string_view(pending_).substr(0, tool_pos))) {
-            set_failure(ParseFailureCode::UNKNOWN_TOOL_GRAMMAR,
-                        "text and tool grammar cannot share one segment");
+          if (!accept_marker(MarkerKind::TOOL_OPEN,
+                             flush && !token_boundaries_)) {
             return;
+          }
+          const std::string prefix = pending_.substr(0, tool_pos);
+          const bool has_text = text_started_ || !whitespace_only(prefix);
+          if (!prefix.empty() && !whitespace_only(prefix)) {
+            emit_payload(output, prefix, /*incomplete=*/false);
+          }
+          if (has_text) {
+            output->emplace_back(
+                OutputSegment{.kind = OutputSegmentKind::TEXT_DONE});
           }
           pending_.erase(0, tool_pos);
           state_ = ParseState::TOOL;
@@ -715,10 +812,14 @@ class TextReasoningParser final : public ModelOutputParser {
         }
       }
       if (marker_pos != std::string::npos) {
-        size_t* marker_count = state_ == ParseState::REASONING
-                                   ? &reasoning_markers_
-                                   : &text_markers_;
-        if (!consume_marker(marker_pos, marker, marker_count, output)) {
+        const MarkerKind marker_kind = state_ == ParseState::REASONING
+                                           ? MarkerKind::REASONING_END
+                                           : MarkerKind::TEXT_END;
+        if (!consume_marker(marker_pos,
+                            marker,
+                            marker_kind,
+                            flush && !token_boundaries_,
+                            output)) {
           return;
         }
         text_started_ = false;
@@ -749,10 +850,15 @@ class TextReasoningParser final : public ModelOutputParser {
         return;
       }
       const std::string payload = pending_.substr(0, safe_size);
-      if (payload.find('<') != std::string::npos) {
-        set_failure(ParseFailureCode::UNKNOWN_CONTROL_TOKEN,
-                    "generation contains an unsupported control marker");
-        return;
+      size_t control_pos = payload.find('<');
+      while (control_pos != std::string::npos) {
+        if (reserved_control_format(
+                std::string_view(payload).substr(control_pos))) {
+          set_failure(ParseFailureCode::UNKNOWN_CONTROL_TOKEN,
+                      "generation contains an unsupported control marker");
+          return;
+        }
+        control_pos = payload.find('<', control_pos + 1);
       }
       emit_payload(output, payload, incomplete);
       if (state_ == ParseState::TEXT && !payload.empty()) {
@@ -769,15 +875,18 @@ class TextReasoningParser final : public ModelOutputParser {
     if (failed_) {
       return;
     }
-    if (state_ == ParseState::TOOL) {
-      set_failure(ParseFailureCode::UNCLOSED_TOOL_CALL,
-                  "generation finished with an unclosed tool call");
+    if (token_boundaries_ && !token_markers_.empty()) {
+      set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
+                  "control token has no matching text marker");
       output->emplace_back(failure_segment_);
       return;
     }
-    if (token_boundaries_ && (reasoning_markers_ != 0 || text_markers_ != 0)) {
-      set_failure(ParseFailureCode::CONTROL_TOKEN_MISMATCH,
-                  "control token has no matching text marker");
+    if (state_ == ParseState::TOOL) {
+      if (incomplete) {
+        return;
+      }
+      set_failure(ParseFailureCode::UNCLOSED_TOOL_CALL,
+                  "generation finished with an unclosed tool call");
       output->emplace_back(failure_segment_);
       return;
     }
@@ -785,11 +894,9 @@ class TextReasoningParser final : public ModelOutputParser {
       emit_payload(output, pending_, incomplete);
       pending_.clear();
     }
-    done_ = true;
   }
 
   TextReasoningGrammar grammar_;
-  std::unordered_set<int32_t> reserved_tokens_;
   ParseState state_ = ParseState::REASONING;
   std::string pending_;
   std::string utf8_pending_;
@@ -797,14 +904,15 @@ class TextReasoningParser final : public ModelOutputParser {
   uint64_t ordinal_ = 0;
   bool sequence_initialized_ = false;
   bool ordinal_initialized_ = false;
-  bool done_ = false;
+  bool finalized_ = false;
   bool failed_ = false;
   bool token_boundaries_ = false;
   bool text_started_ = false;
   bool reasoning_tokens_done_ = false;
+  bool token_in_tool_ = false;
   int32_t reasoning_tokens_ = 0;
-  size_t reasoning_markers_ = 0;
-  size_t text_markers_ = 0;
+  std::vector<int32_t> token_tail_;
+  std::vector<MarkerKind> token_markers_;
   OutputSegment failure_segment_;
 };
 

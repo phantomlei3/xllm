@@ -40,6 +40,7 @@ enum class ParseFailureCode : uint8_t {
   UNKNOWN_CUSTOM_TOOL = 12,
   UNKNOWN_TOOL_GRAMMAR = 13,
   UNCLOSED_TOOL_CALL = 14,
+  TOOL_BLOCK_TOO_LARGE = 15,
 };
 
 struct ParseFailure {

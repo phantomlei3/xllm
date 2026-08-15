@@ -341,6 +341,31 @@ TEST(JinjaChatTemplate, GlmMatchesFrozenFunctionPrompts) {
   EXPECT_EQ(*continued, fixture_prompt("function_output_continue"));
 }
 
+TEST(JinjaChatTemplate, GlmRendersCommentaryBeforeTypedCalls) {
+  TestableJinjaChatTemplate encoder = make_glm_encoder();
+  ChatMessages messages = {Message("user", "Inspect the file.")};
+  Message assistant("assistant", "I'll inspect it.");
+  assistant.reasoning_content = "I need the file.";
+  assistant.protocol_tool_calls = Message::ProtocolToolCallVec{
+      FunctionCall{.id = "call_read",
+                   .name = "read_file",
+                   .arguments = R"({"path":"a.cc"})"}};
+  messages.emplace_back(std::move(assistant));
+  const std::vector<Tool> tools = {FunctionTool{
+      .name = "read_file", .parameters = nlohmann::json::object()}};
+
+  auto prompt = render_glm(encoder, messages, tools);
+  ASSERT_TRUE(prompt.has_value());
+  const size_t reasoning = prompt->find("I need the file.</think>");
+  const size_t commentary = prompt->find("I'll inspect it.");
+  const size_t call = prompt->find("<tool_call>", commentary);
+  ASSERT_NE(reasoning, std::string::npos);
+  ASSERT_NE(commentary, std::string::npos);
+  ASSERT_NE(call, std::string::npos);
+  EXPECT_LT(reasoning, commentary);
+  EXPECT_LT(commentary, call);
+}
+
 TEST(JinjaChatTemplate, GlmMatchesFrozenParallelPrompt) {
   TestableJinjaChatTemplate encoder = make_glm_encoder();
   const std::vector<Tool> tools = {

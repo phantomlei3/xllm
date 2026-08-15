@@ -105,13 +105,11 @@ TemplatePolicy DeepseekV4Profile::resolve_template(
 std::unique_ptr<ModelOutputParser> DeepseekV4Profile::new_parser() const {
   TextReasoningGrammar grammar;
   grammar.reasoning_end = "</think>";
-  grammar.reasoning_end_token = 128822;
+  grammar.reasoning_end_tokens = {128822};
   grammar.text_end = "<｜end▁of▁sentence｜>";
-  grammar.text_end_token = 1;
-  for (int64_t token_id : raw_decoding_.preserved_token_ids) {
-    grammar.reserved_control_tokens.emplace_back(
-        static_cast<int32_t>(token_id));
-  }
+  grammar.text_end_tokens = {1};
+  grammar.tool_open_tokens = {30, 128825, 72461, 4941, 12548, 1018};
+  grammar.tool_done_tokens = {1718, 128825, 72461, 4941, 12548, 32, 1};
   grammar.max_marker_bytes = raw_decoding_.max_marker_bytes;
   grammar.tool.dialect = ToolGrammarDialect::DEEPSEEK_DSML;
   return make_text_reasoning_parser(std::move(grammar));

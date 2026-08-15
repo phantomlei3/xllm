@@ -201,8 +201,9 @@ class ResponsesProcessor final {
   enum class OutputPhase : uint8_t {
     START = 0,
     REASONING = 1,
-    CALLS = 2,
-    TEXT = 3,
+    TEXT_CANDIDATE = 2,
+    CALLS_WITHOUT_PRE_TEXT = 3,
+    CALLS_AFTER_PRE_TEXT = 4,
   };
 
   bool append_reasoning(const model_protocol::OutputSegment& segment);

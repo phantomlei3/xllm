@@ -21,6 +21,7 @@ limitations under the License.
 #include <array>
 #include <cctype>
 #include <cstddef>
+#include <iterator>
 #include <type_traits>
 #include <utility>
 
@@ -241,8 +242,17 @@ bool ResponsesProcessor::consume(const model_protocol::GenerationDelta& delta,
                 "final usage arrived before generation finished");
   }
 
-  const std::vector<model_protocol::OutputSegment> segments =
-      parser.consume(delta);
+  std::vector<model_protocol::OutputSegment> segments = parser.consume(delta);
+  if (terminal) {
+    const std::string reason = delta.finish_reason.value_or("");
+    const bool incomplete = token_limit || reason == "length";
+    std::vector<model_protocol::OutputSegment> final_segments = parser.finalize(
+        incomplete ? model_protocol::ParserTerminalReason::TOKEN_LIMIT
+                   : model_protocol::ParserTerminalReason::NORMAL);
+    segments.insert(segments.end(),
+                    std::make_move_iterator(final_segments.begin()),
+                    std::make_move_iterator(final_segments.end()));
+  }
   if (terminal) {
     if (!delta.final_usage.has_value()) {
       return fail(ErrorCode::GENERATION_FAILED,
@@ -265,8 +275,9 @@ bool ResponsesProcessor::consume(const model_protocol::GenerationDelta& delta,
 
 bool ResponsesProcessor::append_reasoning(
     const model_protocol::OutputSegment& segment) {
-  if (reasoning_closed_ || phase_ == OutputPhase::CALLS ||
-      phase_ == OutputPhase::TEXT ||
+  if (reasoning_closed_ || phase_ == OutputPhase::TEXT_CANDIDATE ||
+      phase_ == OutputPhase::CALLS_WITHOUT_PRE_TEXT ||
+      phase_ == OutputPhase::CALLS_AFTER_PRE_TEXT ||
       (active_kind_ != ActiveKind::NONE &&
        active_kind_ != ActiveKind::REASONING)) {
     return fail(ErrorCode::GENERATION_FAILED,
@@ -306,7 +317,8 @@ bool ResponsesProcessor::append_reasoning(
 
 bool ResponsesProcessor::append_text(
     const model_protocol::OutputSegment& segment) {
-  if (text_closed_ ||
+  if (text_closed_ || phase_ == OutputPhase::CALLS_WITHOUT_PRE_TEXT ||
+      phase_ == OutputPhase::CALLS_AFTER_PRE_TEXT ||
       (active_kind_ != ActiveKind::NONE && active_kind_ != ActiveKind::TEXT)) {
     return fail(ErrorCode::GENERATION_FAILED, "text delta is out of order");
   }
@@ -321,7 +333,7 @@ bool ResponsesProcessor::append_text(
     response_.output.emplace_back(OutputMessageItem{.id = id});
     active_index_ = response_.output.size() - 1;
     active_kind_ = ActiveKind::TEXT;
-    phase_ = OutputPhase::TEXT;
+    phase_ = OutputPhase::TEXT_CANDIDATE;
     emit(OutputItemAddedEvent{.output_index = active_index_,
                               .item = response_.output[active_index_]});
     emit(ContentPartAddedEvent{.output_index = active_index_, .item_id = id});
@@ -345,7 +357,10 @@ bool ResponsesProcessor::append_text(
 
 bool ResponsesProcessor::start_function(
     const model_protocol::OutputSegment& segment) {
-  if (active_kind_ != ActiveKind::NONE || phase_ == OutputPhase::TEXT ||
+  const bool text_candidate = phase_ == OutputPhase::TEXT_CANDIDATE;
+  const bool after_text =
+      text_candidate || phase_ == OutputPhase::CALLS_AFTER_PRE_TEXT;
+  if (active_kind_ != ActiveKind::NONE || (text_candidate && !text_closed_) ||
       segment.name.empty()) {
     return fail(ErrorCode::GENERATION_FAILED,
                 "function call start is out of order");
@@ -360,7 +375,8 @@ bool ResponsesProcessor::start_function(
       .call = FunctionCall{.id = linkage_id, .name = segment.name}});
   active_index_ = response_.output.size() - 1;
   active_kind_ = ActiveKind::FUNCTION;
-  phase_ = OutputPhase::CALLS;
+  phase_ = after_text ? OutputPhase::CALLS_AFTER_PRE_TEXT
+                      : OutputPhase::CALLS_WITHOUT_PRE_TEXT;
   emit(OutputItemAddedEvent{.output_index = active_index_,
                             .item = response_.output[active_index_]});
   return true;
@@ -420,7 +436,10 @@ bool ResponsesProcessor::done_function() {
 
 bool ResponsesProcessor::start_custom(
     const model_protocol::OutputSegment& segment) {
-  if (active_kind_ != ActiveKind::NONE || phase_ == OutputPhase::TEXT ||
+  const bool text_candidate = phase_ == OutputPhase::TEXT_CANDIDATE;
+  const bool after_text =
+      text_candidate || phase_ == OutputPhase::CALLS_AFTER_PRE_TEXT;
+  if (active_kind_ != ActiveKind::NONE || (text_candidate && !text_closed_) ||
       segment.name != "apply_patch") {
     return fail(ErrorCode::GENERATION_FAILED,
                 "custom call start is invalid or out of order");
@@ -435,7 +454,8 @@ bool ResponsesProcessor::start_custom(
       .call = CustomToolCall{.id = linkage_id, .name = "apply_patch"}});
   active_index_ = response_.output.size() - 1;
   active_kind_ = ActiveKind::CUSTOM;
-  phase_ = OutputPhase::CALLS;
+  phase_ = after_text ? OutputPhase::CALLS_AFTER_PRE_TEXT
+                      : OutputPhase::CALLS_WITHOUT_PRE_TEXT;
   emit(OutputItemAddedEvent{.output_index = active_index_,
                             .item = response_.output[active_index_]});
   return true;
@@ -575,6 +595,12 @@ void ResponsesProcessor::mark_incomplete() {
         ItemStatus::INCOMPLETE;
   } else if (active_kind_ == ActiveKind::TEXT) {
     std::get<OutputMessageItem>(response_.output[active_index_]).status =
+        ItemStatus::INCOMPLETE;
+  } else if (active_kind_ == ActiveKind::FUNCTION) {
+    std::get<OutputFunctionCallItem>(response_.output[active_index_]).status =
+        ItemStatus::INCOMPLETE;
+  } else if (active_kind_ == ActiveKind::CUSTOM) {
+    std::get<OutputCustomToolCallItem>(response_.output[active_index_]).status =
         ItemStatus::INCOMPLETE;
   }
 }

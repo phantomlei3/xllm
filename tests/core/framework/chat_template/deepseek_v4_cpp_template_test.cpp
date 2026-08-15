@@ -334,6 +334,39 @@ TEST(DeepseekV4CppTemplate, RendersParallelTypedFunctionCalls) {
   EXPECT_LT(first, second);
 }
 
+TEST(DeepseekV4CppTemplate, RendersCommentaryBeforeTypedCalls) {
+  auto encoder = make_encoder();
+  ChatMessages messages = {Message("user", "Inspect the file.")};
+  Message assistant("assistant", "I'll inspect it.");
+  assistant.reasoning_content = "I need the file.";
+  assistant.protocol_tool_calls = Message::ProtocolToolCallVec{
+      FunctionCall{.id = "call_read",
+                   .name = "read_file",
+                   .arguments = R"({"path":"a.cc"})"}};
+  messages.emplace_back(std::move(assistant));
+
+  const std::vector<Tool> tools = {FunctionTool{
+      .name = "read_file", .parameters = nlohmann::json::object()}};
+  auto prompt = encoder.apply(
+      messages,
+      /*json_tools=*/{},
+      tools,
+      {.thinking_history = model_protocol::ThinkingHistoryPolicy::PRESERVE},
+      model_protocol::ReasoningEffort::LOW,
+      {.kind = model_protocol::ToolChoiceKind::REQUIRED},
+      /*chat_template_kwargs=*/{{"drop_thinking", true}});
+  ASSERT_TRUE(prompt.has_value());
+
+  const size_t reasoning = prompt->find("I need the file.</think>");
+  const size_t commentary = prompt->find("I'll inspect it.");
+  const size_t call = prompt->find("<｜DSML｜tool_calls>", commentary);
+  ASSERT_NE(reasoning, std::string::npos);
+  ASSERT_NE(commentary, std::string::npos);
+  ASSERT_NE(call, std::string::npos);
+  EXPECT_LT(reasoning, commentary);
+  EXPECT_LT(commentary, call);
+}
+
 TEST(DeepseekV4CppTemplate, TemplateDefaultStillDropsHistoricalReasoning) {
   auto encoder = make_encoder();
 

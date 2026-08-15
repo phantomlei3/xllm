@@ -345,10 +345,12 @@ class RequestAssembler final {
 
  private:
   enum class AssistantState : uint8_t {
-    NONE = 0,
+    GROUP_START = 0,
     REASONING = 1,
-    CALLS = 2,
-    MESSAGE = 3,
+    MESSAGE_CANDIDATE = 2,
+    CALLS_WITHOUT_PRE_MESSAGE = 3,
+    CALLS_AFTER_PRE_MESSAGE = 4,
+    FINAL_MESSAGE = 5,
   };
 
   enum class CallKind : uint8_t {
@@ -881,15 +883,16 @@ class RequestAssembler final {
       return invalid(param + ".content", "message content must not be empty");
     }
     if (role == "assistant") {
-      if (assistant_state_ == AssistantState::MESSAGE) {
+      if (assistant_state_ == AssistantState::MESSAGE_CANDIDATE ||
+          assistant_state_ == AssistantState::FINAL_MESSAGE ||
+          assistant_state_ == AssistantState::CALLS_AFTER_PRE_MESSAGE) {
         return make_error(ErrorCode::INVALID_ITEM_ORDER,
                           param,
                           "assistant message is duplicated in its group");
       }
       prepared->canonical_input.emplace_back(
           MessageItem{.id = id, .role = role, .content = content});
-      if (assistant_state_ == AssistantState::REASONING ||
-          assistant_state_ == AssistantState::CALLS) {
+      if (assistant_state_ != AssistantState::GROUP_START) {
         prepared->chat_request
             .mutable_messages(prepared->chat_request.messages_size() - 1)
             ->set_content(content);
@@ -898,7 +901,10 @@ class RequestAssembler final {
         message->set_role("assistant");
         message->set_content(content);
       }
-      assistant_state_ = AssistantState::MESSAGE;
+      assistant_state_ =
+          assistant_state_ == AssistantState::CALLS_WITHOUT_PRE_MESSAGE
+              ? AssistantState::FINAL_MESSAGE
+              : AssistantState::MESSAGE_CANDIDATE;
       return std::nullopt;
     }
     if (!pending_calls_.empty()) {
@@ -906,7 +912,7 @@ class RequestAssembler final {
                         param,
                         "pending tool calls must be completed first");
     }
-    assistant_state_ = AssistantState::NONE;
+    assistant_state_ = AssistantState::GROUP_START;
     add_message(id, role == "developer" ? "system" : role, content, prepared);
     return std::nullopt;
   }
@@ -920,7 +926,7 @@ class RequestAssembler final {
             param)) {
       return error;
     }
-    if (assistant_state_ == AssistantState::MESSAGE) {
+    if (assistant_state_ == AssistantState::FINAL_MESSAGE) {
       return make_error(ErrorCode::INVALID_ITEM_ORDER,
                         param,
                         "tool calls must precede assistant text");
@@ -976,7 +982,9 @@ class RequestAssembler final {
     proto_call->set_type("function");
     proto_call->mutable_function()->set_name(name);
     proto_call->mutable_function()->set_arguments(arguments);
-    assistant_state_ = AssistantState::CALLS;
+    assistant_state_ = has_pre_message()
+                           ? AssistantState::CALLS_AFTER_PRE_MESSAGE
+                           : AssistantState::CALLS_WITHOUT_PRE_MESSAGE;
     return std::nullopt;
   }
 
@@ -989,7 +997,7 @@ class RequestAssembler final {
                            param)) {
       return error;
     }
-    if (assistant_state_ == AssistantState::MESSAGE) {
+    if (assistant_state_ == AssistantState::FINAL_MESSAGE) {
       return make_error(ErrorCode::INVALID_ITEM_ORDER,
                         param,
                         "tool calls must precede assistant text");
@@ -1036,7 +1044,9 @@ class RequestAssembler final {
     proto_call->set_type("custom");
     proto_call->mutable_custom()->set_name("apply_patch");
     proto_call->mutable_custom()->set_input(input);
-    assistant_state_ = AssistantState::CALLS;
+    assistant_state_ = has_pre_message()
+                           ? AssistantState::CALLS_AFTER_PRE_MESSAGE
+                           : AssistantState::CALLS_WITHOUT_PRE_MESSAGE;
     return std::nullopt;
   }
 
@@ -1101,7 +1111,7 @@ class RequestAssembler final {
     message->set_tool_output_type(kind == CallKind::FUNCTION
                                       ? proto::FUNCTION_OUTPUT
                                       : proto::CUSTOM_OUTPUT);
-    assistant_state_ = AssistantState::NONE;
+    assistant_state_ = AssistantState::GROUP_START;
     return std::nullopt;
   }
 
@@ -1181,13 +1191,18 @@ class RequestAssembler final {
   }
 
   proto::ChatMessage* assistant_message(PreparedRequest* prepared) const {
-    if (assistant_state_ == AssistantState::NONE) {
+    if (assistant_state_ == AssistantState::GROUP_START) {
       proto::ChatMessage* message = prepared->chat_request.add_messages();
       message->set_role("assistant");
       return message;
     }
     return prepared->chat_request.mutable_messages(
         prepared->chat_request.messages_size() - 1);
+  }
+
+  bool has_pre_message() const {
+    return assistant_state_ == AssistantState::MESSAGE_CANDIDATE ||
+           assistant_state_ == AssistantState::CALLS_AFTER_PRE_MESSAGE;
   }
 
   std::optional<ResponsesError> parse_reasoning_item(
@@ -1200,7 +1215,7 @@ class RequestAssembler final {
             param)) {
       return error;
     }
-    if (assistant_state_ != AssistantState::NONE) {
+    if (assistant_state_ != AssistantState::GROUP_START) {
       return make_error(ErrorCode::INVALID_ITEM_ORDER,
                         param,
                         "reasoning must begin an assistant group");
@@ -1264,7 +1279,7 @@ class RequestAssembler final {
   std::unordered_set<std::string> pending_calls_;
   std::vector<Tool> tools_;
   uint64_t tool_bytes_ = 0;
-  AssistantState assistant_state_ = AssistantState::NONE;
+  AssistantState assistant_state_ = AssistantState::GROUP_START;
 };
 
 }  // namespace

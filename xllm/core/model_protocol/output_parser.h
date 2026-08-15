@@ -67,17 +67,24 @@ struct ToolGrammar {
   ToolGrammarDialect dialect = ToolGrammarDialect::NONE;
   size_t max_arguments_bytes = 1024 * 1024;
   size_t max_custom_input_bytes = 4 * 1024 * 1024;
+  size_t max_tool_block_bytes = 16 * 1024 * 1024;
   size_t max_json_depth = 64;
 };
 
 struct TextReasoningGrammar {
   std::string reasoning_end;
-  int32_t reasoning_end_token = 0;
+  std::vector<int32_t> reasoning_end_tokens;
   std::string text_end;
-  int32_t text_end_token = 0;
-  std::vector<int32_t> reserved_control_tokens;
+  std::vector<int32_t> text_end_tokens;
+  std::vector<int32_t> tool_open_tokens;
+  std::vector<int32_t> tool_done_tokens;
   size_t max_marker_bytes = 0;
   ToolGrammar tool;
+};
+
+enum class ParserTerminalReason : uint8_t {
+  NORMAL = 0,
+  TOKEN_LIMIT = 1,
 };
 
 class ModelOutputParser {
@@ -85,6 +92,9 @@ class ModelOutputParser {
   virtual ~ModelOutputParser() = default;
 
   virtual std::vector<OutputSegment> consume(const GenerationDelta& delta) = 0;
+  virtual std::vector<OutputSegment> finalize(ParserTerminalReason /*unused*/) {
+    return {};
+  }
   virtual std::optional<int32_t> reasoning_tokens() const {
     return std::nullopt;
   }

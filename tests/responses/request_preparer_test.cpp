@@ -463,6 +463,27 @@ TEST(RequestPreparerTest, PreparesTypedToolsCallsAndOutputs) {
             proto::CUSTOM_OUTPUT);
 }
 
+TEST(RequestPreparerTest, ReplaysCommentaryBeforeCallsInOneAssistantMessage) {
+  PrepareResult result = prepare(R"({
+    "model":"fixture-model",
+    "input":[
+      {"type":"reasoning","id":"rs_1","content":"plan"},
+      {"type":"message","id":"msg_1","role":"assistant","content":"I'll inspect it."},
+      {"type":"function_call","id":"fc_1","call_id":"call_read","name":"read_file","arguments":"{\"path\":\"a.cc\"}"},
+      {"type":"function_call_output","call_id":"call_read","output":"contents"}
+    ]
+  })");
+
+  ASSERT_TRUE(result.ok()) << result.error().message;
+  const PreparedRequest& prepared = result.value();
+  ASSERT_EQ(prepared.chat_request.messages_size(), 2);
+  const proto::ChatMessage& assistant = prepared.chat_request.messages(0);
+  EXPECT_EQ(assistant.reasoning_content(), "plan");
+  EXPECT_EQ(assistant.content(), "I'll inspect it.");
+  ASSERT_EQ(assistant.tool_calls_size(), 1);
+  EXPECT_EQ(assistant.tool_calls(0).function().name(), "read_file");
+}
+
 TEST(RequestPreparerTest, ValidatesToolDefinitionsChoicesAndLimits) {
   struct Case {
     std::string suffix;
@@ -574,9 +595,12 @@ TEST(RequestPreparerTest, ValidatesCallLinkageAndAssistantGrammar) {
       {R"([{"type":"function_call","call_id":"c","name":"a","arguments":"[]"}])",
        ErrorCode::INVALID_TOOL_ARGUMENTS,
        "input[0].arguments"},
-      {R"([{"type":"message","role":"assistant","content":"done"},{"type":"function_call","call_id":"c","name":"a","arguments":"{}"}])",
+      {R"([{"type":"message","role":"assistant","content":"before"},{"type":"function_call","call_id":"c","name":"a","arguments":"{}"},{"type":"message","role":"assistant","content":"after"}])",
        ErrorCode::INVALID_ITEM_ORDER,
-       "input[1]"},
+       "input[2]"},
+      {R"([{"type":"function_call","call_id":"c1","name":"a","arguments":"{}"},{"type":"message","role":"assistant","content":"after"},{"type":"function_call","call_id":"c2","name":"b","arguments":"{}"}])",
+       ErrorCode::INVALID_ITEM_ORDER,
+       "input[2]"},
       {R"([{"type":"custom_tool_call","status":"in_progress","call_id":"c","name":"apply_patch","input":"p"}])",
        ErrorCode::INVALID_REQUEST,
        "input[0].status"},
